@@ -206,10 +206,6 @@ public class VideoConcatExtension : Extension
             }
 
             int transitionFrames = g.UserInput.Get(VideoConcatTransitionFrames, 12);
-            bool enableColorMatch = g.UserInput.Get(VideoConcatEnableColorMatch, true);
-            double colorStrength = g.UserInput.Get(VideoConcatColorStrength, 0.5);
-            bool enableTemporalBlend = g.UserInput.Get(VideoConcatEnableTemporalBlend, true);
-            double temporalStrength = g.UserInput.Get(VideoConcatTemporalStrength, 0.5);
 
             try
             {
@@ -222,8 +218,6 @@ public class VideoConcatExtension : Extension
                 new VideoConcatenator(g)
                     .SetSections(sections, sectionPrompts)
                     .SetTransitionFrames(transitionFrames)
-                    .SetColorMatching(enableColorMatch, colorStrength)
-                    .SetTemporalBlending(enableTemporalBlend, temporalStrength)
                     .Concatenate();
             }
             catch (Exception ex)

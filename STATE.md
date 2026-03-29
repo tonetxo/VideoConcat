@@ -79,44 +79,52 @@ Si no se especifican duraciones, usa el valor de "Video Frames" (default 25) par
 
 ⚠️ Warning esperado: "Extension 'VideoConcatExtension' did not come from git" (normal, no está en repo git)
 
-## Bug Fixed (29/03/2026 - 19:30)
+## Bug Fixed (29/03/2026 - Segunda iteración)
 
-**Problema 1:** La extensión no hacía nada si solo se ponía `Section Prompts` sin `Section Durations`.
-**Solución:** Si no hay duraciones pero sí hay ≥2 prompts, usa frames default.
+**Problema 3 (CRÍTICO):** La extensión no generaba el segundo video ni conectaba el output.
+**Causas múltiples:**
+1. Workflow priority 10.5 corría ANTES de Image To Video (priority 11) - cambiado a 11.5
+2. No se llamaba `SaveOutput` al final - ahora guarda el video concatenado
+3. Los nodos `VideoColorMatch` y `VideoTemporalBlend` no existen - removidos temporalmente
+4. Audio no se preservaba - ahora preserva el audio del primer video
 
-**Problema 2:** El grupo "Video Concatenation" no aparecía en la UI.
-**Solución:** Cambiado `Toggles: false` para que el grupo siempre sea visible.
+**Solución aplicada:**
+- Priority cambiada a 11.5 (después de Image To Video)
+- Añadido `SaveOutput` con ID dinámico
+- Simplificado: solo concatenación de video, sin post-procesado
+- Audio del primer video se preserva en el resultado final
+- Removidos color matching y temporal blending (requieren nodos custom)
 
-**Problema 3 (CRÍTICO):** La extensión corría con prioridad 10.5, ANTES del step de Image To Video (prioridad 11).
-**Causa:** El workflow step priority se basa en orden numérico ascendente (menor = antes).
-**Solución:** 
-- Cambiado priority de 10.5 a **11.5** (después de Image To Video)
-- La extensión ahora usa el video YA GENERADO en `CurrentMedia` como primera sección
-- Eliminado código que regeneraba el primer video
-- El bucle ahora empieza en `i = 1` en lugar de `i = 0`
+## Arquitectura Simplificada
 
-## Arquitectura Funcional
+1. **Prioridad 11:** Image To Video genera el primer video (nativo SwarmUI)
+2. **Prioridad 11.5:** VideoConcat toma ese video y genera continuaciones:
+   - Para cada sección adicional (prompt diferente):
+     - Extrae últimos N frames del video anterior
+     - Genera nuevo video con el prompt de la sección
+     - Añade al array de chunks
+   - Concatena todos los chunks con `ImageBatch`
+   - Guarda el resultado final
+3. Preserva el audio del primer video
 
-1. **Prioridad 11:** Image To Video genera el primer video (step nativo de SwarmUI)
-2. **Prioridad 11.5:** VideoConcat toma ese video y genera continuaciones
-3. Para cada sección adicional (i >= 1):
-   - Extrae últimos N frames del video anterior
-   - Genera nueva sección continuando desde esos frames
-   - Aplica color matching si está habilitado
-4. Concatena todas las secciones
-5. Aplica temporal blending final
+**Limitaciones actuales:**
+- Sin color matching entre secciones (nodo custom requerido)
+- Sin temporal blending (nodo custom requerido)
+- Audio no se concatena, solo del primer video
 
-## Parámetros
+## Parámetros Activos
 
 | Parámetro | Tipo | Requerido | Descripción |
 |-----------|------|-----------|-------------|
 | `Section Prompts` | string | **Sí (mínimo 2)** | Prompts separados por `\|\|\|`. El primer prompt se usa para el video inicial. |
 | `Section Durations` | string | No | Frames por sección. Si vacío, usa "Video Frames" para todas. |
 | `Transition Frames` | int | No | Overlap entre secciones (default: 12) |
-| `Enable Color Matching` | bool | No | Match de color (default: true) |
-| `Color Match Strength` | double | No | 0-1 (default: 0.5) |
-| `Enable Temporal Blending` | bool | No | Blending temporal (default: true) |
-| `Temporal Blend Strength` | double | No | 0-1 (default: 0.5) |
+
+**Parámetros NO implementados (reservados para futuro):**
+- `Enable Color Matching` - sin implementar
+- `Color Match Strength` - sin implementar
+- `Enable Temporal Blending` - sin implementar
+- `Temporal Blend Strength` - sin implementar
 
 ## TODO / Próximos Pasos
 

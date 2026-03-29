@@ -14,10 +14,6 @@ public class VideoConcatenator
     private JArray _sections;
     private string[] _sectionPrompts;
     private int _transitionFrames = 12;
-    private bool _enableColorMatch = true;
-    private double _colorStrength = 0.5;
-    private bool _enableTemporalBlend = true;
-    private double _temporalStrength = 0.5;
 
     public VideoConcatenator(WorkflowGenerator generator)
     {
@@ -34,20 +30,6 @@ public class VideoConcatenator
     public VideoConcatenator SetTransitionFrames(int frames)
     {
         _transitionFrames = frames;
-        return this;
-    }
-
-    public VideoConcatenator SetColorMatching(bool enabled, double strength)
-    {
-        _enableColorMatch = enabled;
-        _colorStrength = strength;
-        return this;
-    }
-
-    public VideoConcatenator SetTemporalBlending(bool enabled, double strength)
-    {
-        _enableTemporalBlend = enabled;
-        _temporalStrength = strength;
         return this;
     }
 
@@ -70,6 +52,9 @@ public class VideoConcatenator
             Logs.Warning("[VideoConcat] CurrentMedia has no video frames - VideoConcat should run after Image To Video step");
             return;
         }
+
+        WGNodeData originalAudioVae = _generator.CurrentAudioVae;
+        WGNodeData originalVae = _generator.CurrentVae;
 
         int? baseFrames = _generator.UserInput.TryGet(T2IParamTypes.VideoFrames, out int framesRaw) ? framesRaw : null;
         int? baseFps = _generator.UserInput.TryGet(T2IParamTypes.VideoFPS, out int fpsRaw) ? fpsRaw : null;
@@ -100,7 +85,10 @@ public class VideoConcatenator
         JArray widthArr = GetWidthNode();
         JArray heightArr = GetHeightNode();
 
+        WGNodeData previousVideo = currentMedia;
         List<JArray> videoChunks = [currentMedia.Path];
+        WGNodeData originalAudio = currentMedia.AttachedAudio;
+        
         int? videoFps = baseFps ?? currentMedia.FPS;
 
         for (int i = 1; i < _sections.Count; i++)
@@ -114,29 +102,34 @@ public class VideoConcatenator
             double? sectionCfg = baseCfg;
             int sectionSteps = baseSteps;
 
-            currentMedia = GenerateContinuationSection(
-                videoModel, currentMedia, frames, videoFps ?? 24, sectionSteps, sectionCfg,
+            previousVideo = GenerateContinuationSection(
+                videoModel, previousVideo, frames, videoFps ?? 24, sectionSteps, sectionCfg,
                 width, height, widthArr, heightArr, prompt, negPrompt, sectionSeed, i
             );
 
-            if (_enableColorMatch && videoChunks.Count > 0)
-            {
-                JArray colorMatched = ApplyColorMatching(currentMedia.Path, videoChunks[^1], _colorStrength);
-                currentMedia = currentMedia.WithPath(colorMatched);
-            }
-
-            videoChunks.Add(currentMedia.Path);
+            videoChunks.Add(previousVideo.Path);
         }
 
-        JArray concatenatedPath = ConcatenateVideoChunks(videoChunks);
+        JArray concatenatedVideo = ConcatenateVideoChunks(videoChunks);
 
-        if (_enableTemporalBlend)
+        // TODO: Temporal blending would require a custom ComfyUI node
+        // Currently using simple video concatenation
+        
+        WGNodeData result = previousVideo.WithPath(concatenatedVideo);
+        result.FPS = videoFps;
+        
+        // Preserve original audio from the first video
+        if (originalAudio != null)
         {
-            concatenatedPath = ApplyTemporalBlend(concatenatedPath, _temporalStrength);
+            result.AttachedAudio = originalAudio;
         }
-
-        _generator.CurrentMedia = currentMedia.WithPath(concatenatedPath);
-        _generator.CurrentMedia.FPS = videoFps;
+        
+        _generator.CurrentMedia = result;
+        
+        string outputId = _generator.GetStableDynamicID(50000, 0);
+        _generator.CurrentMedia.SaveOutput(originalVae, originalAudioVae, outputId);
+        
+        Logs.Info($"[VideoConcat] Generated {_sections.Count} sections, concatenated video saved with ID {outputId}");
     }
 
     private WGNodeData GenerateContinuationSection(
@@ -179,6 +172,9 @@ public class VideoConcatenator
         T2IModel videoSwapModel = _generator.UserInput.Get(T2IParamTypes.VideoSwapModel, null);
         double swapPercent = _generator.UserInput.Get(T2IParamTypes.VideoSwapPercent, 0.5);
 
+        WGNodeData inputForSection = previousVideo.WithPath(partialBatch);
+        _generator.CurrentMedia = inputForSection;
+        
         WorkflowGenerator.ImageToVideoGenInfo genInfo = new()
         {
             Generator = _generator,
@@ -199,7 +195,6 @@ public class VideoConcatenator
             ContextID = T2IParamInput.SectionID_Video
         };
 
-        _generator.CurrentMedia = previousVideo.WithPath(partialBatch);
         _generator.CreateImageToVideo(genInfo);
         
         WGNodeData result = _generator.CurrentMedia.AsRawImage(genInfo.Vae);
@@ -264,16 +259,5 @@ public class VideoConcatenator
         }
 
         return currentBatch;
-    }
-
-    private JArray ApplyTemporalBlend(JArray video, double strength)
-    {
-        string blendNode = _generator.CreateNode("VideoTemporalBlend", new JObject()
-        {
-            ["video"] = video,
-            ["blend_strength"] = strength,
-            ["blend_frames"] = _transitionFrames
-        });
-        return [blendNode, 0];
     }
 }
