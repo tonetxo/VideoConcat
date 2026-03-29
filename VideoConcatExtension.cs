@@ -121,8 +121,7 @@ public class VideoConcatExtension : Extension
             Group: VideoConcatGroup,
             OrderPriority: priority++,
             FeatureFlag: "video",
-            DoNotPreview: true,
-            Toggleable: true
+            DoNotPreview: true
         ));
 
         VideoConcatColorStrength = T2IParamTypes.Register<double>(new T2IParamType(
@@ -136,8 +135,7 @@ public class VideoConcatExtension : Extension
             Group: VideoConcatGroup,
             OrderPriority: priority++,
             FeatureFlag: "video",
-            DoNotPreview: true,
-            DependNonDefault: VideoConcatEnableColorMatch.Type.ID
+            DoNotPreview: true
         ));
 
         VideoConcatEnableTemporalBlend = T2IParamTypes.Register<bool>(new T2IParamType(
@@ -148,8 +146,7 @@ public class VideoConcatExtension : Extension
             Group: VideoConcatGroup,
             OrderPriority: priority++,
             FeatureFlag: "video",
-            DoNotPreview: true,
-            Toggleable: true
+            DoNotPreview: true
         ));
 
         VideoConcatTemporalStrength = T2IParamTypes.Register<double>(new T2IParamType(
@@ -163,8 +160,7 @@ public class VideoConcatExtension : Extension
             Group: VideoConcatGroup,
             OrderPriority: priority++,
             FeatureFlag: "video",
-            DoNotPreview: true,
-            DependNonDefault: VideoConcatEnableTemporalBlend.Type.ID
+            DoNotPreview: true
         ));
     }
 
