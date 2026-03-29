@@ -79,52 +79,54 @@ Si no se especifican duraciones, usa el valor de "Video Frames" (default 25) par
 
 ⚠️ Warning esperado: "Extension 'VideoConcatExtension' did not come from git" (normal, no está en repo git)
 
-## Bug Fixed (29/03/2026 - Segunda iteración)
+## Bug Fixed (29/03/2026 - Iteración final)
 
-**Problema 3 (CRÍTICO):** La extensión no generaba el segundo video ni conectaba el output.
-**Causas múltiples:**
+**Problema:** La extensión no generaba el segundo video.
+
+**Causas:**
 1. Workflow priority 10.5 corría ANTES de Image To Video (priority 11) - cambiado a 11.5
-2. No se llamaba `SaveOutput` al final - ahora guarda el video concatenado
-3. Los nodos `VideoColorMatch` y `VideoTemporalBlend` no existen - removidos temporalmente
-4. Audio no se preservaba - ahora preserva el audio del primer video
+2. No se llamaba `SaveOutput` al final
+3. Color matching y temporal blend estaban deshabilitados innecesariamente
 
-**Solución aplicada:**
+**Solución final:**
 - Priority cambiada a 11.5 (después de Image To Video)
-- Añadido `SaveOutput` con ID dinámico
-- Simplificado: solo concatenación de video, sin post-procesado
-- Audio del primer video se preserva en el resultado final
-- Removidos color matching y temporal blending (requieren nodos custom)
+- Añadido `SaveOutput` para guardar el video concatenado
+- Color matching y temporal blend re-habilitados (nodos custom SÍ existen en `comfy_node/video_concat_nodes.py`)
+- Audio del primer video preservado en el resultado
 
-## Arquitectura Simplificada
+## Arquitectura Final
 
 1. **Prioridad 11:** Image To Video genera el primer video (nativo SwarmUI)
 2. **Prioridad 11.5:** VideoConcat toma ese video y genera continuaciones:
    - Para cada sección adicional (prompt diferente):
      - Extrae últimos N frames del video anterior
      - Genera nuevo video con el prompt de la sección
+     - Aplica color matching con la sección anterior
      - Añade al array de chunks
    - Concatena todos los chunks con `ImageBatch`
-   - Guarda el resultado final
-3. Preserva el audio del primer video
+   - Aplica temporal blending final
+   - Guarda el resultado con audio del primer video
 
-**Limitaciones actuales:**
-- Sin color matching entre secciones (nodo custom requerido)
-- Sin temporal blending (nodo custom requerido)
-- Audio no se concatena, solo del primer video
+## Nodos ComfyUI Incluidos
 
-## Parámetros Activos
+En `comfy_node/video_concat_nodes.py`:
+- `VideoColorMatch` - Matching de histograma de color entre videos
+- `VideoTemporalBlend` - Suavizado temporal para reducir flickering
+- `VideoCrossFadeTransition` - Transiciones crossfade entre videos
+- `VideoBatch` - Batching de frames
+- `EmptyLatentVideo` - Latent vacío para generación
 
-| Parámetro | Tipo | Requerido | Descripción |
-|-----------|------|-----------|-------------|
-| `Section Prompts` | string | **Sí (mínimo 2)** | Prompts separados por `\|\|\|`. El primer prompt se usa para el video inicial. |
-| `Section Durations` | string | No | Frames por sección. Si vacío, usa "Video Frames" para todas. |
-| `Transition Frames` | int | No | Overlap entre secciones (default: 12) |
+## Parámetros
 
-**Parámetros NO implementados (reservados para futuro):**
-- `Enable Color Matching` - sin implementar
-- `Color Match Strength` - sin implementar
-- `Enable Temporal Blending` - sin implementar
-- `Temporal Blend Strength` - sin implementar
+| Parámetro | Tipo | Default | Descripción |
+|-----------|------|---------|-------------|
+| `Section Prompts` | string | - | Prompts separados por `\|\|\|` (mínimo 2) |
+| `Section Durations` | string | - | Frames por sección (opcional, usa Video Frames) |
+| `Transition Frames` | int | 12 | Overlap entre secciones |
+| `Enable Color Matching` | bool | true | Match de color entre secciones |
+| `Color Match Strength` | double | 0.5 | Intensidad del color matching (0-1) |
+| `Enable Temporal Blending` | bool | true | Blending temporal |
+| `Temporal Blend Strength` | double | 0.5 | Intensidad del blending (0-1) |
 
 ## TODO / Próximos Pasos
 

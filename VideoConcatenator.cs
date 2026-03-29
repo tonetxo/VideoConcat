@@ -14,6 +14,10 @@ public class VideoConcatenator
     private JArray _sections;
     private string[] _sectionPrompts;
     private int _transitionFrames = 12;
+    private bool _enableColorMatch = true;
+    private double _colorStrength = 0.5;
+    private bool _enableTemporalBlend = true;
+    private double _temporalStrength = 0.5;
 
     public VideoConcatenator(WorkflowGenerator generator)
     {
@@ -30,6 +34,20 @@ public class VideoConcatenator
     public VideoConcatenator SetTransitionFrames(int frames)
     {
         _transitionFrames = frames;
+        return this;
+    }
+
+    public VideoConcatenator SetColorMatching(bool enabled, double strength)
+    {
+        _enableColorMatch = enabled;
+        _colorStrength = strength;
+        return this;
+    }
+
+    public VideoConcatenator SetTemporalBlending(bool enabled, double strength)
+    {
+        _enableTemporalBlend = enabled;
+        _temporalStrength = strength;
         return this;
     }
 
@@ -107,13 +125,23 @@ public class VideoConcatenator
                 width, height, widthArr, heightArr, prompt, negPrompt, sectionSeed, i
             );
 
+            // Apply color matching to match with previous section
+            if (_enableColorMatch && videoChunks.Count > 0)
+            {
+                JArray colorMatched = ApplyColorMatching(previousVideo.Path, videoChunks[^1], _colorStrength);
+                previousVideo = previousVideo.WithPath(colorMatched);
+            }
+
             videoChunks.Add(previousVideo.Path);
         }
 
         JArray concatenatedVideo = ConcatenateVideoChunks(videoChunks);
 
-        // TODO: Temporal blending would require a custom ComfyUI node
-        // Currently using simple video concatenation
+        // Apply temporal blending for smoother transitions
+        if (_enableTemporalBlend)
+        {
+            concatenatedVideo = ApplyTemporalBlend(concatenatedVideo, _temporalStrength);
+        }
         
         WGNodeData result = previousVideo.WithPath(concatenatedVideo);
         result.FPS = videoFps;
@@ -259,5 +287,16 @@ public class VideoConcatenator
         }
 
         return currentBatch;
+    }
+
+    private JArray ApplyTemporalBlend(JArray video, double strength)
+    {
+        string blendNode = _generator.CreateNode("VideoTemporalBlend", new JObject()
+        {
+            ["video"] = video,
+            ["blend_strength"] = strength,
+            ["blend_frames"] = _transitionFrames
+        });
+        return [blendNode, 0];
     }
 }
