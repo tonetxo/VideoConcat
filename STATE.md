@@ -1,33 +1,31 @@
 # VideoConcat Extension - Estado Actual
 
-**Última actualización:** 29 de marzo de 2026
+**Última actualización:** 30 de marzo de 2026
 
 ## Goal
 
-Extensión para SwarmUI que permite concatenar múltiples secciones de video con coherencia temporal. Cada sección continúa desde los últimos frames de la sección anterior, soportando diferentes prompts por sección, color matching y temporal blending.
+Extensión para SwarmUI que permite concatenar múltiples secciones de video con coherencia temporal. Cada sección continúa desde los últimos frames de la sección anterior, soportando diferentes prompts por sección, crossfade transitions, color matching y temporal blending.
 
 ## Instrucciones
 
-- La extensión aparece en la UI como grupo colapsable "Video Concatenation" con `Toggles: true`
-- El grupo se habilita automáticamente cuando "Section Prompts" tiene contenido
+- La extensión aparece en la UI como grupo "Video Concatenation" con toggle
+- Se habilita cuando "Section Prompts" tiene contenido separado por `|||`
 - La extensión debe:
   1. Correr DESPUÉS del paso Image To Video (prioridad 11.5)
-  2. Tomar el primer video de Image To Video como input (generado con el prompt principal)
-  3. Generar videos de continuación para cada prompt en Section Prompts
-  4. Concatenar todos los videos juntos
-  5. Manejar audio correctamente (de LTXV y modelos similares)
-  6. Aplicar color matching y temporal blending
+  2. Tomar el primer video de Image To Video como input
+  3. Generar videos de continuación para cada prompt
+  4. Aplicar crossfade transitions entre videos
+  5. Aplicar color matching y temporal blending
+  6. Concatenar audio con fade in/out
 
 ## Flujo de Prompts
 
-El flujo CORRECTO de prompts es:
-1. **Video 1**: Se genera con Image To Video usando el prompt principal de SwarmUI
+1. **Video 1**: Se genera con Image To Video usando el prompt principal
 2. **Videos 2+**: Se generan con los prompts de "Section Prompts", separados por `|||`
    - `sectionPrompts[0]` → Video 2
    - `sectionPrompts[1]` → Video 3
-   - etc.
 
-Ejemplo con `Section Prompts = "A cat running|||A cat jumping"`:
+Ejemplo: `Section Prompts = "A cat running|||A cat jumping"`
 - Video 1: prompt principal de Image To Video
 - Video 2: "A cat running"
 - Video 3: "A cat jumping"
@@ -36,104 +34,100 @@ Ejemplo con `Section Prompts = "A cat running|||A cat jumping"`:
 
 ```
 src/Extensions/VideoConcat/
-├── VideoConcatExtension.cs      # Registro de extensión, parámetros y workflow step
-├── VideoConcatExtension.csproj  # Archivo de proyecto .NET 8
-├── VideoConcatenator.cs         # Lógica core de generación y concatenación
-├── README.md                    # Documentación de uso
-├── STATE.md                     # Este archivo
-├── assets/
-│   ├── video-concat.js          # Frontend UI (simplificado)
-│   └── video-concat.css         # Estilos
+├── VideoConcatExtension.cs      # Registro de extensión y parámetros
+├── VideoConcatenator.cs         # Lógica core de concatenación
+├── README.md                   # Documentación
+├── STATE.md                    # Este archivo
 └── comfy_node/
-    ├── __init__.py
-    └── video_concat_nodes.py    # Nodos ComfyUI personalizados
+    └── video_concat_nodes.py   # Nodos ComfyUI personalizados
 ```
 
 ## Completado ✅
 
-1. ✅ Extensión compila y registra parámetros
-2. ✅ Workflow step corre con prioridad correcta (11.5)
-3. ✅ Generación de video para secciones de continuación funciona
-4. ✅ Concatenación de video con ImageBatch funciona
-5. ✅ Nodos de color matching y temporal blend creados
-6. ✅ Repositorio git inicializado con commits
-7. ✅ Lógica de prompts corregida (primer prompt = video 2, no video 1)
-8. ✅ Grupo con `Toggles: true` - se habilita cuando Section Prompts tiene contenido
-
-## Cómo Funciona el Toggle
-
-El patrón es el mismo que otras extensiones (`Film Grain`, `ReActor`, etc.):
-- Grupo con `Toggles: true`
-- Toggle aparece junto al nombre del grupo
-- Cuando está activado, los parámetros del grupo se envían
-- El workflow step solo se ejecuta si `sectionPrompts.Length > 0`
+1. ✅ Toggle del grupo funcional
+2. ✅ Lógica de prompts corregida
+3. ✅ Crossfade transitions implementadas
+4. ✅ Color matching usando frames de transición como referencia
+5. ✅ Temporal blending solo en zonas de transición
+6. ✅ Audio handling con fade in/out
+7. ✅ Modos configurables de transición
 
 ## Parámetros
 
 | Parámetro | Tipo | Default | Descripción |
 |-----------|------|---------|-------------|
-| `Section Prompts` | string | "" | Prompts para videos 2+, separados por `\|\|\|`. Habilita la extensión. |
+| `Section Prompts` | string | "" | Prompts para videos 2+, separados por `\|\|\|` |
 | `Section Durations` | string | "" | Frames por sección (incluye video 1) |
-| `Transition Frames` | int | 12 | Overlap entre secciones |
+| `Transition Frames` | int | 12 | Frames para crossfade entre secciones |
+| `Transition Mode` | string | "crossfade" | crossfade, fade_to_black, fade_to_white, dissolve |
+| `Frame Mode` | string | "exclude_overlap" | include_overlap (video + largo), exclude_overlap (largo combinado) |
 | `Enable Color Matching` | bool | true | Match de color entre secciones |
 | `Color Match Strength` | double | 0.5 | Intensidad del color matching (0-1) |
-| `Enable Temporal Blending` | bool | true | Blending temporal |
+| `Enable Temporal Blending` | bool | true | Blending temporal en transiciones |
 | `Temporal Blend Strength` | double | 0.5 | Intensidad del blending (0-1) |
+| `Enable Audio Fade` | bool | true | Fade in/out en audio de transiciones |
 
-## En Progreso ❌
+## Flujo de Transiciones
 
-- ❌ ComfyUI workflow muestra error "Failed to save workflow draft"
-
-## Audio Handling
-
-El audio ahora se maneja correctamente para todos los videos:
-1. Cada video generado tiene `AttachedAudio` tipo `DT_LATENT_AUDIO`
-2. En `GenerateContinuationSection`, se llama `AsRawImage` que separa video y audio latent
-3. En el bucle principal, cada audio latent se decodifica con `LTXVAudioVAEDecode`
-4. Todos los audios decodificados se concatenan con `AudioConcat`
-5. El audio concatenado final se adjunta al video resultante
-
-**Flujo de audio:**
+### Crossfade (modo por defecto)
 ```
-Video 1 (Image To Video) → AttachedAudio (DT_LATENT_AUDIO) → decode → audioChunks[0]
-Video 2..N → AttachedAudio (DT_LATENT_AUDIO) → decode → audioChunks[1..N]
-audioChunks → AudioConcat → result.AttachedAudio (DT_AUDIO)
-result → SaveOutput → final video + audio
+Video 1: [frame 0...120] (121 frames)
+Video 2: [frame 0...120] (121 frames)
+
+Crossfade Process:
+1. Video 1[0...108] se mantiene (109 frames sin cambios)
+2. Blend zone: Video 1[109...120] blend con Video 2[0...11] (12 frames)
+3. Video 2[12...120] se mantiene (109 frames sin cambios)
+
+Resultado (exclude_overlap): 109 + 12 + 109 = 230 frames
+Resultado (include_overlap): 121 + 121 = 242 frames (con overlap)
 ```
 
-## Nodos ComfyUI Incluidos
+### Color Matching
+- Solo usa los últimos N frames del video anterior como referencia
+- Aplica histogram matching antes de concatenar
+- Más preciso que comparar videos completos
 
-En `comfy_node/video_concat_nodes.py`:
-- `VideoColorMatch` - Matching de histograma de color entre videos
-- `VideoTemporalBlend` - Suavizado temporal para reducir flickering
-- `VideoCrossFadeTransition` - Transiciones crossfade entre videos
+### Temporal Blending
+- Solo aplica en zonas de transición (primeros y últimos N frames)
+- No afecta el contenido central del video
+- Reduce flickering sin causar efecto ghost
+
+### Audio Fade
+- Fade out al final del audio anterior
+- Fade in al inicio del audio siguiente
+- Crossfade en la zona de transición
+
+## Nodos ComfyUI
+
+- `VideoColorMatch` - Matching de histograma de color
+- `VideoTemporalBlend` - Suavizado temporal en transiciones
+- `VideoCrossFadeTransition` - Transiciones crossfade con modos
+- `AudioFade` - Fade in/out para audio
 - `VideoBatch` - Batching de frames
-- `EmptyLatentVideo` - Latent vacío para generación
 
 ## Flujo de Trabajo
 
-1. **Prioridad 11:** Image To Video genera el primer video con el prompt principal (nativo SwarmUI)
-2. **Prioridad 11.5:** VideoConcat (si Section Prompts tiene contenido):
-   - Para cada prompt en Section Prompts (video 2+):
+1. **Prioridad 11:** Image To Video genera Video 1
+2. **Prioridad 11.5:** VideoConcat:
+   - Para cada sección adicional:
      - Extrae últimos N frames del video anterior
-     - Genera nuevo video con el prompt de la sección
-     - Aplica color matching con la sección anterior
-     - Añade al array de chunks
-   - Concatena todos los chunks con `ImageBatch`
-   - Aplica temporal blending final
-   - Guarda el resultado
+     - Genera nuevo video continuando desde esos frames
+     - Aplica color matching con frames de referencia
+   - Concatena todos con `VideoCrossFadeTransition`
+   - Aplica temporal blending en transiciones
+   - Concatena audio con fade in/out
 
 ## Notas Técnicas
 
-- Usa `ImageToVideoGenInfo` y `CreateImageToVideo()` del sistema existente
-- Similar a Video Extend (`<extend:N>`) pero con prompts variables
-- Cada sección re-renderiza con el modelo de video seleccionado
-- El overlap es crítico para coherencia temporal (frames compartidos)
+- Crossfade elimina cortes bruscos entre videos
+- Color matching usa frames cercanos, no videos completos
+- Temporal blending solo en boundaries, no en todo el video
+- Audio fade suaviza transiciones de sonido
 
-## Contact/Author
+## Commits
 
-Creado por SwarmUI Extension Generator. Para continuar desarrollo, revisar:
-- `WorkflowGeneratorSteps.cs` líneas 1874-2096 (Image To Video y Video Extend)
-- `WorkflowGenerator.cs` para nodos y helper methods
-- `T2IParamTypes.cs` para parámetros de video existentes
-- `WGNodeData.cs` para audio handling
+1. `58f7cfd` - Implement proper audio handling
+2. `8479f05` - Remove redundant Toggleable
+3. `3141983` - Fix toggle and prompt logic
+4. `ec46789` - Major improvements: crossfade transitions, configurable modes, audio fade
