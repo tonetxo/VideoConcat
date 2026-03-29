@@ -423,51 +423,92 @@ public class VideoConcatenator
         if (chunks.Count == 1)
             return chunks[0];
 
-        JArray currentAudio = chunks[0];
-
-        for (int i = 1; i < chunks.Count; i++)
+        if (_enableAudioFade)
         {
-            if (_enableAudioFade)
+            // Apply fades to individual chunks BEFORE concatenation
+            // First chunk: fade out at the end
+            // Middle chunks: fade in at start, fade out at end
+            // Last chunk: fade in at start
+            
+            List<JArray> processedChunks = new List<JArray>();
+            
+            for (int i = 0; i < chunks.Count; i++)
             {
-                // Apply fade out to end of current audio
-                string fadeOutNode = _generator.CreateNode("AudioFade", new JObject()
+                JArray chunk = chunks[i];
+                
+                if (i == 0)
                 {
-                    ["audio"] = currentAudio,
-                    ["fade_length"] = _transitionFrames,
-                    ["fade_type"] = "out"
-                });
-
-                // Apply fade in to start of next audio
-                string fadeInNode = _generator.CreateNode("AudioFade", new JObject()
+                    // First chunk: only fade out at the end
+                    string fadeOutNode = _generator.CreateNode("AudioFade", new JObject()
+                    {
+                        ["audio"] = chunk,
+                        ["fade_length"] = _transitionFrames,
+                        ["fade_type"] = "out"
+                    });
+                    processedChunks.Add(new JArray(fadeOutNode, 0));
+                }
+                else if (i == chunks.Count - 1)
                 {
-                    ["audio"] = chunks[i],
-                    ["fade_length"] = _transitionFrames,
-                    ["fade_type"] = "in"
-                });
-
-                // Concatenate with crossfade
+                    // Last chunk: only fade in at the start
+                    string fadeInNode = _generator.CreateNode("AudioFade", new JObject()
+                    {
+                        ["audio"] = chunk,
+                        ["fade_length"] = _transitionFrames,
+                        ["fade_type"] = "in"
+                    });
+                    processedChunks.Add(new JArray(fadeInNode, 0));
+                }
+                else
+                {
+                    // Middle chunks: fade in at start AND fade out at end
+                    string fadeInNode = _generator.CreateNode("AudioFade", new JObject()
+                    {
+                        ["audio"] = chunk,
+                        ["fade_length"] = _transitionFrames,
+                        ["fade_type"] = "in"
+                    });
+                    string fadeOutNode = _generator.CreateNode("AudioFade", new JObject()
+                    {
+                        ["audio"] = new JArray(fadeInNode, 0),
+                        ["fade_length"] = _transitionFrames,
+                        ["fade_type"] = "out"
+                    });
+                    processedChunks.Add(new JArray(fadeOutNode, 0));
+                }
+            }
+            
+            // Now concatenate all processed chunks
+            JArray result = processedChunks[0];
+            for (int i = 1; i < processedChunks.Count; i++)
+            {
                 string concatNode = _generator.CreateNode("AudioConcat", new JObject()
                 {
-                    ["audio1"] = new JArray(fadeOutNode, 0),
-                    ["audio2"] = new JArray(fadeInNode, 0),
-                    ["crossfade"] = _transitionFrames,
+                    ["audio1"] = result,
+                    ["audio2"] = processedChunks[i],
                     ["direction"] = "after"
                 });
-                currentAudio = [concatNode, 0];
+                result = new JArray(concatNode, 0);
             }
-            else
+            
+            return result;
+        }
+        else
+        {
+            // Simple concatenation without fade
+            JArray currentAudio = chunks[0];
+
+            for (int i = 1; i < chunks.Count; i++)
             {
-                // Simple concatenation without fade
                 string concatNode = _generator.CreateNode("AudioConcat", new JObject()
                 {
                     ["audio1"] = currentAudio,
                     ["audio2"] = chunks[i],
                     ["direction"] = "after"
                 });
-                currentAudio = [concatNode, 0];
+                currentAudio = new JArray(concatNode, 0);
             }
-        }
 
-        return currentAudio;
+            return currentAudio;
+        }
     }
 }
