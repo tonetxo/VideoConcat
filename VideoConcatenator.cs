@@ -121,7 +121,8 @@ public class VideoConcatenator
 
             if (_enableColorMatch && videoChunks.Count > 0)
             {
-                currentMedia = ApplyColorMatching(currentMedia.Path, videoChunks[^1], _colorStrength);
+                JArray colorMatched = ApplyColorMatching(currentMedia.Path, videoChunks[^1], _colorStrength);
+                currentMedia = currentMedia.WithPath(colorMatched);
             }
 
             videoChunks.Add(currentMedia.Path);
@@ -178,7 +179,7 @@ public class VideoConcatenator
         T2IModel videoSwapModel = _generator.UserInput.Get(T2IParamTypes.VideoSwapModel, null);
         double swapPercent = _generator.UserInput.Get(T2IParamTypes.VideoSwapPercent, 0.5);
 
-        ImageToVideoGenInfo genInfo = new()
+        WorkflowGenerator.ImageToVideoGenInfo genInfo = new()
         {
             Generator = _generator,
             VideoModel = videoModel,
