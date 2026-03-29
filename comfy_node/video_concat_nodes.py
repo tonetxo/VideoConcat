@@ -43,7 +43,7 @@ class VideoColorMatch:
 
         Args:
             video: Tensor of shape (frames, height, width, channels)
-            reference: Tensor of shape (frames, height, width, channels)
+            reference: Tensor of shape (ref_frames, height, width, channels)
             strength: Float 0-1 for blend strength
 
         Returns:
@@ -52,27 +52,36 @@ class VideoColorMatch:
         if strength <= 0:
             return (video,)
 
-        # Ensure we have compatible shapes
-        if reference.shape[0] > video.shape[0]:
-            reference = reference[: video.shape[0]]
-        elif video.shape[0] > reference.shape[0]:
-            reference = torch.nn.functional.interpolate(
-                reference.permute(0, 3, 1, 2),
-                size=(video.shape[1], video.shape[2]),
-                mode="bilinear",
-            ).permute(0, 2, 3, 1)
-            reference = reference[: video.shape[0]]
+        # Compute global statistics for reference (mean and std per frame)
+        # Reference may have fewer frames (just transition frames), so we use global stats
+        ref_mean = reference.mean(
+            dim=(1, 2), keepdim=True
+        )  # Shape: (ref_frames, 1, 1, channels)
+        ref_std = (
+            reference.std(dim=(1, 2), keepdim=True) + 1e-6
+        )  # Shape: (ref_frames, 1, 1, channels)
 
-        # Compute mean and std for color matching
-        ref_mean = reference.mean(dim=(1, 2), keepdim=True)
-        ref_std = reference.std(dim=(1, 2), keepdim=True) + 1e-6
+        # Aggregate to single global statistics
+        ref_mean_global = ref_mean.mean(
+            dim=0, keepdim=True
+        )  # Shape: (1, 1, 1, channels)
+        ref_std_global = ref_std.mean(dim=0, keepdim=True)  # Shape: (1, 1, 1, channels)
 
-        vid_mean = video.mean(dim=(1, 2), keepdim=True)
-        vid_std = video.std(dim=(1, 2), keepdim=True) + 1e-6
+        # Compute statistics for video (per frame)
+        vid_mean = video.mean(
+            dim=(1, 2), keepdim=True
+        )  # Shape: (frames, 1, 1, channels)
+        vid_std = (
+            video.std(dim=(1, 2), keepdim=True) + 1e-6
+        )  # Shape: (frames, 1, 1, channels)
+
+        # Expand global reference stats to match video frames
+        ref_mean_expanded = ref_mean_global.expand(video.shape[0], -1, -1, -1)
+        ref_std_expanded = ref_std_global.expand(video.shape[0], -1, -1, -1)
 
         # Normalize and then apply reference statistics
         normalized = (video - vid_mean) / vid_std
-        matched = normalized * ref_std + ref_mean
+        matched = normalized * ref_std_expanded + ref_mean_expanded
 
         # Clamp to valid range
         matched = torch.clamp(matched, 0.0, 1.0)
