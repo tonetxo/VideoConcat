@@ -75,25 +75,42 @@ Si no se especifican duraciones, usa el valor de "Video Frames" (default 25) par
 
 ## Estado del Build
 
-✅ Compila correctamente (último check: 01:26)
+✅ Compila correctamente
 
 ⚠️ Warning esperado: "Extension 'VideoConcatExtension' did not come from git" (normal, no está en repo git)
 
-## Bug Fixed (29/03/2026 - 19:15)
+## Bug Fixed (29/03/2026 - 19:30)
 
 **Problema 1:** La extensión no hacía nada si solo se ponía `Section Prompts` sin `Section Durations`.
-**Causa:** El workflow step hacía early return si `durationsRaw` estaba vacío.
 **Solución:** Si no hay duraciones pero sí hay ≥2 prompts, usa frames default.
 
 **Problema 2:** El grupo "Video Concatenation" no aparecía en la UI.
-**Causa:** El grupo tenía `Toggles: true`, lo que requiere un parámetro activador. Como ningún parámetro tenía el grupo como dependencia, el grupo estaba oculto.
-**Solución:** Cambiado a `Toggles: false` para que el grupo siempre sea visible.
+**Solución:** Cambiado `Toggles: false` para que el grupo siempre sea visible.
 
-## Parámetros (después del fix)
+**Problema 3 (CRÍTICO):** La extensión corría con prioridad 10.5, ANTES del step de Image To Video (prioridad 11).
+**Causa:** El workflow step priority se basa en orden numérico ascendente (menor = antes).
+**Solución:** 
+- Cambiado priority de 10.5 a **11.5** (después de Image To Video)
+- La extensión ahora usa el video YA GENERADO en `CurrentMedia` como primera sección
+- Eliminado código que regeneraba el primer video
+- El bucle ahora empieza en `i = 1` en lugar de `i = 0`
+
+## Arquitectura Funcional
+
+1. **Prioridad 11:** Image To Video genera el primer video (step nativo de SwarmUI)
+2. **Prioridad 11.5:** VideoConcat toma ese video y genera continuaciones
+3. Para cada sección adicional (i >= 1):
+   - Extrae últimos N frames del video anterior
+   - Genera nueva sección continuando desde esos frames
+   - Aplica color matching si está habilitado
+4. Concatena todas las secciones
+5. Aplica temporal blending final
+
+## Parámetros
 
 | Parámetro | Tipo | Requerido | Descripción |
 |-----------|------|-----------|-------------|
-| `Section Prompts` | string | **Sí (mínimo 2)** | Prompts separados por `\|\|\|`. Activa la extensión. |
+| `Section Prompts` | string | **Sí (mínimo 2)** | Prompts separados por `\|\|\|`. El primer prompt se usa para el video inicial. |
 | `Section Durations` | string | No | Frames por sección. Si vacío, usa "Video Frames" para todas. |
 | `Transition Frames` | int | No | Overlap entre secciones (default: 12) |
 | `Enable Color Matching` | bool | No | Match de color (default: true) |

@@ -231,7 +231,7 @@ public class VideoConcatExtension : Extension
                 Logs.Error($"VideoConcat extension error: {ex.Message}");
                 throw new SwarmUserErrorException($"Failed to concatenate videos: {ex.Message}");
             }
-        }, 10.5);
+        }, 11.5);
     }
 
     private static int[] ParseDurations(string durationsRaw)

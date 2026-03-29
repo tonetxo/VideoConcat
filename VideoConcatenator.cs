@@ -64,6 +64,13 @@ public class VideoConcatenator
             throw new SwarmUserErrorException("Video concatenation requires a Video Model selected in 'Image To Video'");
         }
 
+        WGNodeData currentMedia = _generator.CurrentMedia;
+        if (currentMedia.Frames == null || currentMedia.Frames < 1)
+        {
+            Logs.Warning("[VideoConcat] CurrentMedia has no video frames - VideoConcat should run after Image To Video step");
+            return;
+        }
+
         int? baseFrames = _generator.UserInput.TryGet(T2IParamTypes.VideoFrames, out int framesRaw) ? framesRaw : null;
         int? baseFps = _generator.UserInput.TryGet(T2IParamTypes.VideoFPS, out int fpsRaw) ? fpsRaw : null;
         double? baseCfg = _generator.UserInput.GetNullable(T2IParamTypes.CFGScale, T2IParamInput.SectionID_Video, false) 
@@ -93,11 +100,10 @@ public class VideoConcatenator
         JArray widthArr = GetWidthNode();
         JArray heightArr = GetHeightNode();
 
-        WGNodeData currentMedia = _generator.CurrentMedia.AsRawImage(_generator.CurrentVae);
-        List<JArray> videoChunks = [];
-        int? videoFps = baseFps;
+        List<JArray> videoChunks = [currentMedia.Path];
+        int? videoFps = baseFps ?? currentMedia.FPS;
 
-        for (int i = 0; i < _sections.Count; i++)
+        for (int i = 1; i < _sections.Count; i++)
         {
             JObject section = _sections[i] as JObject;
             int frames = section["duration_frames"]?.Value<int>() ?? baseFrames ?? 25;
@@ -108,20 +114,10 @@ public class VideoConcatenator
             double? sectionCfg = baseCfg;
             int sectionSteps = baseSteps;
 
-            if (i == 0)
-            {
-                currentMedia = GenerateFirstSection(
-                    videoModel, currentMedia, frames, videoFps ?? 24, sectionSteps, sectionCfg,
-                    width, height, widthArr, heightArr, prompt, negPrompt, sectionSeed
-                );
-            }
-            else
-            {
-                currentMedia = GenerateContinuationSection(
-                    videoModel, currentMedia, frames, videoFps ?? 24, sectionSteps, sectionCfg,
-                    width, height, widthArr, heightArr, prompt, negPrompt, sectionSeed, i
-                );
-            }
+            currentMedia = GenerateContinuationSection(
+                videoModel, currentMedia, frames, videoFps ?? 24, sectionSteps, sectionCfg,
+                width, height, widthArr, heightArr, prompt, negPrompt, sectionSeed, i
+            );
 
             if (_enableColorMatch && videoChunks.Count > 0)
             {
@@ -129,7 +125,6 @@ public class VideoConcatenator
             }
 
             videoChunks.Add(currentMedia.Path);
-            videoFps = videoFps ?? currentMedia.FPS;
         }
 
         JArray concatenatedPath = ConcatenateVideoChunks(videoChunks);
@@ -141,50 +136,6 @@ public class VideoConcatenator
 
         _generator.CurrentMedia = currentMedia.WithPath(concatenatedPath);
         _generator.CurrentMedia.FPS = videoFps;
-    }
-
-    private WGNodeData GenerateFirstSection(
-        T2IModel videoModel,
-        WGNodeData inputImage,
-        int frames,
-        int fps,
-        int steps,
-        double? cfg,
-        int width,
-        int height,
-        JArray widthArr,
-        JArray heightArr,
-        string prompt,
-        string negPrompt,
-        long seed)
-    {
-        T2IModel videoSwapModel = _generator.UserInput.Get(T2IParamTypes.VideoSwapModel, null);
-        double swapPercent = _generator.UserInput.Get(T2IParamTypes.VideoSwapPercent, 0.5);
-
-        ImageToVideoGenInfo genInfo = new()
-        {
-            Generator = _generator,
-            VideoModel = videoModel,
-            VideoSwapModel = videoSwapModel,
-            VideoSwapPercent = swapPercent,
-            Frames = frames,
-            VideoCFG = cfg,
-            VideoFPS = fps,
-            Width = widthArr,
-            Height = heightArr,
-            Prompt = prompt,
-            NegativePrompt = negPrompt,
-            Steps = steps,
-            Seed = seed,
-            BatchIndex = -1,
-            BatchLen = -1,
-            ContextID = T2IParamInput.SectionID_Video
-        };
-
-        _generator.CurrentMedia = inputImage;
-        _generator.CreateImageToVideo(genInfo);
-        
-        return _generator.CurrentMedia.AsRawImage(genInfo.Vae);
     }
 
     private WGNodeData GenerateContinuationSection(
