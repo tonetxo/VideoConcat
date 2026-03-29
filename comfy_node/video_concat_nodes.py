@@ -112,6 +112,13 @@ class VideoTemporalBlend:
                         "tooltip": "Number of frames affected by blending.",
                     },
                 ),
+                "mode": (
+                    ["transition_only", "full_video"],
+                    {
+                        "default": "transition_only",
+                        "tooltip": "transition_only: blend only near transitions. full_video: blend entire video.",
+                    },
+                ),
             }
         }
 
@@ -120,7 +127,9 @@ class VideoTemporalBlend:
     CATEGORY = "SwarmUI/video"
     DESCRIPTION = "Apply temporal blending to reduce flickering."
 
-    def temporal_blend(self, video, blend_strength, blend_frames):
+    def temporal_blend(
+        self, video, blend_strength, blend_frames, mode="transition_only"
+    ):
         """
         Apply temporal blending using exponential moving average.
 
@@ -128,6 +137,7 @@ class VideoTemporalBlend:
             video: Tensor of shape (frames, height, width, channels)
             blend_strength: Float 0-1 for blend strength
             blend_frames: Number of frames for blending
+            mode: "transition_only" or "full_video"
 
         Returns:
             Temporally smoothed video tensor
@@ -138,13 +148,34 @@ class VideoTemporalBlend:
         frames = video.shape[0]
         result = video.clone()
 
-        # Apply temporal smoothing frame by frame
-        for i in range(1, frames):
-            # Calculate blend factor based on distance and strength
-            factor = blend_strength * min(1.0, blend_frames / frames)
+        if mode == "transition_only":
+            # Apply blending only in transition zones (beginning and end of video)
+            # This is useful for concatenated videos where transitions are at boundaries
 
-            # Blend current frame with previous
-            result[i] = result[i] * (1 - factor * 0.5) + result[i - 1] * (factor * 0.5)
+            # Blend at the beginning (first blend_frames)
+            for i in range(1, min(blend_frames, frames)):
+                factor = blend_strength * (1 - i / blend_frames)
+                result[i] = result[i] * (1 - factor * 0.5) + result[i - 1] * (
+                    factor * 0.5
+                )
+
+            # Blend at the end (last blend_frames)
+            for i in range(max(1, frames - blend_frames), frames):
+                factor = blend_strength * (i - (frames - blend_frames)) / blend_frames
+                if i < frames - 1:
+                    result[i] = result[i] * (1 - factor * 0.5) + result[i + 1] * (
+                        factor * 0.5
+                    )
+        else:
+            # full_video mode: blend across entire video
+            for i in range(1, frames):
+                # Calculate blend factor based on distance and strength
+                factor = blend_strength * min(1.0, blend_frames / max(1, frames))
+
+                # Blend current frame with previous
+                result[i] = result[i] * (1 - factor * 0.5) + result[i - 1] * (
+                    factor * 0.5
+                )
 
         return (result,)
 
@@ -173,6 +204,13 @@ class VideoCrossFadeTransition:
                     ["crossfade", "fade_to_black", "fade_to_white", "dissolve"],
                     {"default": "crossfade"},
                 ),
+                "include_overlap": (
+                    "BOOLEAN",
+                    {
+                        "default": False,
+                        "tooltip": "If True, include overlap frames in output (longer video). If False, exclude overlap (same length as combined).",
+                    },
+                ),
             }
         }
 
@@ -181,7 +219,9 @@ class VideoCrossFadeTransition:
     CATEGORY = "SwarmUI/video"
     DESCRIPTION = "Create a crossfade transition between two video sections."
 
-    def crossfade(self, video_a, video_b, transition_frames, blend_mode):
+    def crossfade(
+        self, video_a, video_b, transition_frames, blend_mode, include_overlap=False
+    ):
         """
         Crossfade between two videos.
 
@@ -190,6 +230,7 @@ class VideoCrossFadeTransition:
             video_b: Second video tensor (frames_b, H, W, C)
             transition_frames: Number of frames for transition
             blend_mode: Type of transition
+            include_overlap: If True, keep all frames. If False, remove overlap.
 
         Returns:
             Concatenated video tensor with transition
@@ -201,8 +242,13 @@ class VideoCrossFadeTransition:
         # Get H, W, C from video_a
         h, w, c = video_a.shape[1], video_a.shape[2], video_a.shape[3]
 
-        # Calculate output frames
-        output_frames = frames_a + frames_b - trans
+        # Calculate output frames based on mode
+        if include_overlap:
+            # Include overlap: frames_a + trans (overlap) + (frames_b - trans)
+            output_frames = frames_a + frames_b
+        else:
+            # Exclude overlap: frames_a + frames_b - trans (overlap removed)
+            output_frames = frames_a + frames_b - trans
 
         # Create output tensor
         result = torch.zeros((output_frames, h, w, c), dtype=video_a.dtype)
@@ -236,7 +282,12 @@ class VideoCrossFadeTransition:
                 )
 
         # Copy video_b after transition
-        result[frames_a:] = video_b[trans:]
+        if include_overlap:
+            # Include overlaps frames from video_b starting from 0
+            result[frames_a:] = video_b
+        else:
+            # Exclude overlap: start from trans frames into video_b
+            result[frames_a:] = video_b[trans:]
 
         return (result,)
 
@@ -313,6 +364,94 @@ class EmptyLatentVideo:
         return ({"samples": latent, "length": length},)
 
 
+class AudioFade:
+    """
+    Applies fade in or fade out to audio.
+    Uses ComfyUI's native audio processing.
+    """
+
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "audio": ("AUDIO",),
+                "fade_length": (
+                    "FLOAT",
+                    {
+                        "default": 0.5,
+                        "min": 0.0,
+                        "max": 10.0,
+                        "step": 0.1,
+                        "tooltip": "Duration of the fade in seconds.",
+                    },
+                ),
+                "fade_type": (
+                    ["in", "out", "inout"],
+                    {
+                        "default": "out",
+                        "tooltip": "Type of fade: in, out, or both (inout).",
+                    },
+                ),
+            }
+        }
+
+    RETURN_TYPES = ("AUDIO",)
+    FUNCTION = "apply_fade"
+    CATEGORY = "SwarmUI/audio"
+    DESCRIPTION = "Apply fade in/out to audio for smooth transitions."
+
+    def apply_fade(self, audio, fade_length, fade_type):
+        """
+        Apply audio fade.
+
+        Args:
+            audio: Audio tensor (waveform)
+            fade_length: Duration in seconds
+            fade_type: 'in', 'out', or 'inout'
+
+        Returns:
+            Faded audio tensor
+        """
+        if fade_length <= 0:
+            return (audio,)
+
+        # Audio is typically shape (channels, samples) or (samples,)
+        # Apply envelope multiplication for fade
+        waveform = audio.get("waveform", audio) if isinstance(audio, dict) else audio
+
+        # Calculate fade samples
+        sample_rate = (
+            audio.get("sample_rate", 44100) if isinstance(audio, dict) else 44100
+        )
+        fade_samples = int(fade_length * sample_rate)
+
+        # Create fade envelope
+        if fade_type == "in":
+            # Fade in: 0 to 1
+            fade_in = torch.linspace(0, 1, min(fade_samples, waveform.shape[-1]))
+            envelope = torch.ones(waveform.shape[-1])
+            envelope[: len(fade_in)] = fade_in
+        elif fade_type == "out":
+            # Fade out: 1 to 0
+            fade_out = torch.linspace(1, 0, min(fade_samples, waveform.shape[-1]))
+            envelope = torch.ones(waveform.shape[-1])
+            envelope[-len(fade_out) :] = fade_out
+        else:  # inout
+            # Both fade in and fade out
+            fade_in = torch.linspace(0, 1, min(fade_samples, waveform.shape[-1] // 2))
+            fade_out = torch.linspace(1, 0, min(fade_samples, waveform.shape[-1] // 2))
+            envelope = torch.ones(waveform.shape[-1])
+            envelope[: len(fade_in)] = fade_in
+            envelope[-len(fade_out) :] = fade_out
+
+        # Apply envelope
+        result = waveform * envelope
+
+        if isinstance(audio, dict):
+            return ({"waveform": result, "sample_rate": sample_rate},)
+        return (result,)
+
+
 # Node mappings for ComfyUI
 NODE_CLASS_MAPPINGS = {
     "VideoColorMatch": VideoColorMatch,
@@ -320,6 +459,7 @@ NODE_CLASS_MAPPINGS = {
     "VideoCrossFadeTransition": VideoCrossFadeTransition,
     "VideoBatch": VideoBatch,
     "EmptyLatentVideo": EmptyLatentVideo,
+    "AudioFade": AudioFade,
 }
 
 # Human-readable display names
@@ -329,4 +469,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "VideoCrossFadeTransition": "Video CrossFade Transition (SwarmUI)",
     "VideoBatch": "Video Batch (SwarmUI)",
     "EmptyLatentVideo": "Empty Latent Video (SwarmUI)",
+    "AudioFade": "Audio Fade (SwarmUI)",
 }

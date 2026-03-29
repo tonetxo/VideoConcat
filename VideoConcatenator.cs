@@ -14,10 +14,13 @@ public class VideoConcatenator
     private JArray _sections;
     private string[] _sectionPrompts;
     private int _transitionFrames = 12;
+    private string _transitionMode = "crossfade";
+    private string _frameMode = "exclude_overlap";
     private bool _enableColorMatch = true;
     private double _colorStrength = 0.5;
     private bool _enableTemporalBlend = true;
     private double _temporalStrength = 0.5;
+    private bool _enableAudioFade = true;
 
     public VideoConcatenator(WorkflowGenerator generator)
     {
@@ -37,6 +40,18 @@ public class VideoConcatenator
         return this;
     }
 
+    public VideoConcatenator SetTransitionMode(string mode)
+    {
+        _transitionMode = mode ?? "crossfade";
+        return this;
+    }
+
+    public VideoConcatenator SetFrameMode(string mode)
+    {
+        _frameMode = mode ?? "exclude_overlap";
+        return this;
+    }
+
     public VideoConcatenator SetColorMatching(bool enabled, double strength)
     {
         _enableColorMatch = enabled;
@@ -48,6 +63,12 @@ public class VideoConcatenator
     {
         _enableTemporalBlend = enabled;
         _temporalStrength = strength;
+        return this;
+    }
+
+    public VideoConcatenator SetAudioFade(bool enabled, int transitionFrames)
+    {
+        _enableAudioFade = enabled;
         return this;
     }
 
@@ -104,7 +125,7 @@ public class VideoConcatenator
         JArray heightArr = GetHeightNode();
 
         WGNodeData previousVideo = currentMedia;
-        List<JArray> videoChunks = [currentMedia.Path];
+        List<WGNodeData> videoChunks = [currentMedia];
         List<JArray> audioChunks = [];
         
         // Audio VAE for decoding (from first video)
@@ -143,14 +164,7 @@ public class VideoConcatenator
                 width, height, widthArr, heightArr, prompt, negPrompt, sectionSeed, i
             );
 
-            // Apply color matching to match with previous section
-            if (_enableColorMatch && videoChunks.Count > 0)
-            {
-                JArray colorMatched = ApplyColorMatching(newVideo.Path, videoChunks[^1], _colorStrength);
-                newVideo = newVideo.WithPath(colorMatched);
-            }
-
-            videoChunks.Add(newVideo.Path);
+            videoChunks.Add(newVideo);
             
             // Decode and accumulate audio from this section
             if (newVideo.AttachedAudio != null && audioVae != null)
@@ -169,9 +183,27 @@ public class VideoConcatenator
             previousVideo = newVideo;
         }
 
+        // Apply color matching before concatenation (using transition frames as reference)
+        if (_enableColorMatch && videoChunks.Count > 1)
+        {
+            for (int i = 1; i < videoChunks.Count; i++)
+            {
+                WGNodeData previousChunk = videoChunks[i - 1];
+                WGNodeData currentChunk = videoChunks[i];
+                
+                // Extract last transitionFrames from previous video as reference
+                JArray refFrames = ExtractLastFrames(previousChunk.Path, _transitionFrames);
+                
+                // Apply color matching
+                JArray colorMatched = ApplyColorMatching(currentChunk.Path, refFrames, _colorStrength);
+                videoChunks[i] = currentChunk.WithPath(colorMatched);
+            }
+        }
+
+        // Concatenate with crossfade transitions
         JArray concatenatedVideo = ConcatenateVideoChunks(videoChunks);
 
-        // Apply temporal blending for smoother transitions
+        // Apply temporal blending near transitions only
         if (_enableTemporalBlend)
         {
             concatenatedVideo = ApplyTemporalBlend(concatenatedVideo, _temporalStrength);
@@ -180,7 +212,7 @@ public class VideoConcatenator
         WGNodeData result = previousVideo.WithPath(concatenatedVideo);
         result.FPS = videoFps;
         
-        // Concatenate all audio chunks
+        // Concatenate all audio chunks with fade
         if (audioChunks.Count > 0)
         {
             JArray concatenatedAudio = ConcatenateAudioChunks(audioChunks);
@@ -267,23 +299,11 @@ public class VideoConcatenator
         // AsRawImage separates video and audio, attaching audio as DT_LATENT_AUDIO
         WGNodeData rawResult = _generator.CurrentMedia.AsRawImage(genInfo.Vae);
         
-        // Cut the transition frames from the beginning
-        string cutNode = _generator.CreateNode("ImageFromBatch", new JObject()
-        {
-            ["image"] = rawResult.Path,
-            ["batch_index"] = _transitionFrames,
-            ["length"] = frames - _transitionFrames
-        });
-
-        WGNodeData finalResult = rawResult.WithPath([cutNode, 0]);
+        // Return complete video - transition will be handled by crossfade
+        rawResult.Frames = frames;
+        rawResult.FPS = fps;
         
-        // Preserve the attached audio from video generation (it's DT_LATENT_AUDIO)
-        // Will be decoded when needed for final output
-        finalResult.AttachedAudio = rawResult.AttachedAudio;
-        finalResult.Frames = frames - _transitionFrames;
-        finalResult.FPS = fps;
-        
-        return finalResult;
+        return rawResult;
     }
 
     private JArray GetWidthNode()
@@ -304,6 +324,30 @@ public class VideoConcatenator
         return [node, 0];
     }
 
+    private JArray ExtractLastFrames(JArray video, int frameCount)
+    {
+        string frameCountNode = _generator.CreateNode("SwarmCountFrames", new JObject()
+        {
+            ["image"] = video
+        });
+        JArray totalFrames = [frameCountNode, 0];
+
+        string startIndexNode = _generator.CreateNode("SwarmIntAdd", new JObject()
+        {
+            ["a"] = totalFrames,
+            ["b"] = -frameCount
+        });
+
+        string extractNode = _generator.CreateNode("ImageFromBatch", new JObject()
+        {
+            ["image"] = video,
+            ["batch_index"] = [startIndexNode, 0],
+            ["length"] = frameCount
+        });
+
+        return [extractNode, 0];
+    }
+
     private JArray ApplyColorMatching(JArray currentVideo, JArray referenceVideo, double strength)
     {
         string colorMatchNode = _generator.CreateNode("VideoColorMatch", new JObject()
@@ -315,36 +359,58 @@ public class VideoConcatenator
         return [colorMatchNode, 0];
     }
 
-    private JArray ConcatenateVideoChunks(List<JArray> chunks)
+    private JArray ConcatenateVideoChunks(List<WGNodeData> chunks)
     {
         if (chunks.Count == 0)
             return null;
         
         if (chunks.Count == 1)
-            return chunks[0];
+            return chunks[0].Path;
 
-        JArray currentBatch = chunks[0];
+        JArray currentVideo = chunks[0].Path;
+        int currentFrames = chunks[0].Frames ?? 0;
 
         for (int i = 1; i < chunks.Count; i++)
         {
-            string transitionNode = _generator.CreateNode("ImageBatch", new JObject()
+            JArray nextVideo = chunks[i].Path;
+            int nextFrames = chunks[i].Frames ?? 0;
+
+            // Apply crossfade transition
+            string crossfadeNode = _generator.CreateNode("VideoCrossFadeTransition", new JObject()
             {
-                ["image1"] = currentBatch,
-                ["image2"] = chunks[i]
+                ["video_a"] = currentVideo,
+                ["video_b"] = nextVideo,
+                ["transition_frames"] = _transitionFrames,
+                ["blend_mode"] = _transitionMode,
+                ["include_overlap"] = _frameMode == "include_overlap"
             });
-            currentBatch = [transitionNode, 0];
+
+            currentVideo = [crossfadeNode, 0];
+            
+            // Update frame count based on mode
+            if (_frameMode == "include_overlap")
+            {
+                currentFrames = currentFrames + nextFrames; // Full overlap, total adds
+            }
+            else
+            {
+                currentFrames = currentFrames + nextFrames - _transitionFrames; // Exclude overlap
+            }
         }
 
-        return currentBatch;
+        return currentVideo;
     }
 
     private JArray ApplyTemporalBlend(JArray video, double strength)
     {
+        // Apply temporal blend only near transition points
+        // This smooths only the transition areas, not the entire video
         string blendNode = _generator.CreateNode("VideoTemporalBlend", new JObject()
         {
             ["video"] = video,
             ["blend_strength"] = strength,
-            ["blend_frames"] = _transitionFrames
+            ["blend_frames"] = _transitionFrames,
+            ["mode"] = "transition_only"
         });
         return [blendNode, 0];
     }
@@ -361,13 +427,45 @@ public class VideoConcatenator
 
         for (int i = 1; i < chunks.Count; i++)
         {
-            string concatNode = _generator.CreateNode("AudioConcat", new JObject()
+            if (_enableAudioFade)
             {
-                ["audio1"] = currentAudio,
-                ["audio2"] = chunks[i],
-                ["direction"] = "after"
-            });
-            currentAudio = [concatNode, 0];
+                // Apply fade out to end of current audio
+                string fadeOutNode = _generator.CreateNode("AudioFade", new JObject()
+                {
+                    ["audio"] = currentAudio,
+                    ["fade_length"] = _transitionFrames,
+                    ["fade_type"] = "out"
+                });
+
+                // Apply fade in to start of next audio
+                string fadeInNode = _generator.CreateNode("AudioFade", new JObject()
+                {
+                    ["audio"] = chunks[i],
+                    ["fade_length"] = _transitionFrames,
+                    ["fade_type"] = "in"
+                });
+
+                // Concatenate with crossfade
+                string concatNode = _generator.CreateNode("AudioConcat", new JObject()
+                {
+                    ["audio1"] = [fadeOutNode, 0],
+                    ["audio2"] = [fadeInNode, 0],
+                    ["crossfade"] = _transitionFrames,
+                    ["direction"] = "after"
+                });
+                currentAudio = [concatNode, 0];
+            }
+            else
+            {
+                // Simple concatenation without fade
+                string concatNode = _generator.CreateNode("AudioConcat", new JObject()
+                {
+                    ["audio1"] = currentAudio,
+                    ["audio2"] = chunks[i],
+                    ["direction"] = "after"
+                });
+                currentAudio = [concatNode, 0];
+            }
         }
 
         return currentAudio;

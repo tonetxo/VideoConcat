@@ -15,10 +15,13 @@ public class VideoConcatExtension : Extension
     public static T2IRegisteredParam<string> VideoConcatSectionPrompts;
     public static T2IRegisteredParam<string> VideoConcatSectionDurations;
     public static T2IRegisteredParam<int> VideoConcatTransitionFrames;
+    public static T2IRegisteredParam<string> VideoConcatTransitionMode;
+    public static T2IRegisteredParam<string> VideoConcatFrameMode;
     public static T2IRegisteredParam<bool> VideoConcatEnableColorMatch;
     public static T2IRegisteredParam<double> VideoConcatColorStrength;
     public static T2IRegisteredParam<bool> VideoConcatEnableTemporalBlend;
     public static T2IRegisteredParam<double> VideoConcatTemporalStrength;
+    public static T2IRegisteredParam<bool> VideoConcatEnableAudioFade;
 
     public override void OnPreInit()
     {
@@ -113,6 +116,35 @@ public class VideoConcatExtension : Extension
             DoNotPreview: true
         ));
 
+        VideoConcatTransitionMode = T2IParamTypes.Register<string>(new T2IParamType(
+            Name: "Transition Mode",
+            Description: "How to blend between video sections.\n" +
+                         "crossfade: Smooth blend between videos.\n" +
+                         "fade_to_black: Fade out then fade in.\n" +
+                         "fade_to_white: Fade to white then fade in.\n" +
+                         "dissolve: Random pixel dissolve effect.",
+            Default: "crossfade",
+            Group: VideoConcatGroup,
+            OrderPriority: priority++,
+            FeatureFlag: "video",
+            DoNotPreview: true,
+            GetValues: _ => ["crossfade", "fade_to_black", "fade_to_white", "dissolve"]
+        ));
+
+        VideoConcatFrameMode = T2IParamTypes.Register<string>(new T2IParamType(
+            Name: "Frame Mode",
+            Description: "How to handle frames in transitions.\n" +
+                         "include_overlap: Keep all frames, transition adds to total length.\n" +
+                         "exclude_overlap: Remove overlap frames, same length as sections combined.\n" +
+                         "Recommended: exclude_overlap for normal concatenation.",
+            Default: "exclude_overlap",
+            Group: VideoConcatGroup,
+            OrderPriority: priority++,
+            FeatureFlag: "video",
+            DoNotPreview: true,
+            GetValues: _ => ["include_overlap", "exclude_overlap"]
+        ));
+
         VideoConcatEnableColorMatch = T2IParamTypes.Register<bool>(new T2IParamType(
             Name: "Enable Color Matching",
             Description: "Match colors between video sections for visual coherence.\n" +
@@ -162,6 +194,16 @@ public class VideoConcatExtension : Extension
             FeatureFlag: "video",
             DoNotPreview: true
         ));
+
+        VideoConcatEnableAudioFade = T2IParamTypes.Register<bool>(new T2IParamType(
+            Name: "Enable Audio Fade",
+            Description: "Apply fade in/out to audio at transitions for smooth audio blending.",
+            Default: "true",
+            Group: VideoConcatGroup,
+            OrderPriority: priority++,
+            FeatureFlag: "video",
+            DoNotPreview: true
+        ));
     }
 
     private static void RegisterWorkflowStep()
@@ -204,10 +246,13 @@ public class VideoConcatExtension : Extension
             }
 
             int transitionFrames = g.UserInput.Get(VideoConcatTransitionFrames, 12);
+            string transitionMode = g.UserInput.Get(VideoConcatTransitionMode, "crossfade");
+            string frameMode = g.UserInput.Get(VideoConcatFrameMode, "exclude_overlap");
             bool enableColorMatch = g.UserInput.Get(VideoConcatEnableColorMatch, true);
             double colorStrength = g.UserInput.Get(VideoConcatColorStrength, 0.5);
             bool enableTemporalBlend = g.UserInput.Get(VideoConcatEnableTemporalBlend, true);
             double temporalStrength = g.UserInput.Get(VideoConcatTemporalStrength, 0.5);
+            bool enableAudioFade = g.UserInput.Get(VideoConcatEnableAudioFade, true);
 
             try
             {
@@ -220,8 +265,11 @@ public class VideoConcatExtension : Extension
                 new VideoConcatenator(g)
                     .SetSections(sections, sectionPrompts)
                     .SetTransitionFrames(transitionFrames)
+                    .SetTransitionMode(transitionMode)
+                    .SetFrameMode(frameMode)
                     .SetColorMatching(enableColorMatch, colorStrength)
                     .SetTemporalBlending(enableTemporalBlend, temporalStrength)
+                    .SetAudioFade(enableAudioFade, transitionFrames)
                     .Concatenate();
             }
             catch (Exception ex)
