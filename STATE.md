@@ -82,8 +82,24 @@ El patrón es el mismo que otras extensiones (`Film Grain`, `ReActor`, etc.):
 
 ## En Progreso ❌
 
-- ❌ Audio del segundo video no está siendo decodificado apropiadamente (LTXV Audio VAE Decode faltante en workflow)
 - ❌ ComfyUI workflow muestra error "Failed to save workflow draft"
+
+## Audio Handling
+
+El audio ahora se maneja correctamente para todos los videos:
+1. Cada video generado tiene `AttachedAudio` tipo `DT_LATENT_AUDIO`
+2. En `GenerateContinuationSection`, se llama `AsRawImage` que separa video y audio latent
+3. En el bucle principal, cada audio latent se decodifica con `LTXVAudioVAEDecode`
+4. Todos los audios decodificados se concatenan con `AudioConcat`
+5. El audio concatenado final se adjunta al video resultante
+
+**Flujo de audio:**
+```
+Video 1 (Image To Video) → AttachedAudio (DT_LATENT_AUDIO) → decode → audioChunks[0]
+Video 2..N → AttachedAudio (DT_LATENT_AUDIO) → decode → audioChunks[1..N]
+audioChunks → AudioConcat → result.AttachedAudio (DT_AUDIO)
+result → SaveOutput → final video + audio
+```
 
 ## Nodos ComfyUI Incluidos
 

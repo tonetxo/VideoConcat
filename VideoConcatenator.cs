@@ -110,14 +110,17 @@ public class VideoConcatenator
         // Audio VAE for decoding (from first video)
         WGNodeData audioVae = _generator.CurrentAudioVae;
         
-        // Store first video's audio - this will be the final audio (not concatenating for now)
-        WGNodeData finalAudio = null;
+        // Store first video's audio (already decoded by Image To Video)
         if (currentMedia.AttachedAudio != null)
         {
-            finalAudio = currentMedia.AttachedAudio;
-            if (finalAudio.DataType == WGNodeData.DT_LATENT_AUDIO && audioVae != null)
+            WGNodeData firstAudio = currentMedia.AttachedAudio;
+            if (firstAudio.DataType == WGNodeData.DT_LATENT_AUDIO && audioVae != null)
             {
-                finalAudio = finalAudio.DecodeLatents(audioVae, true);
+                firstAudio = firstAudio.DecodeLatents(audioVae, true);
+            }
+            if (firstAudio != null && firstAudio.DataType == WGNodeData.DT_AUDIO)
+            {
+                audioChunks.Add(firstAudio.Path);
             }
         }
         
@@ -148,6 +151,21 @@ public class VideoConcatenator
             }
 
             videoChunks.Add(newVideo.Path);
+            
+            // Decode and accumulate audio from this section
+            if (newVideo.AttachedAudio != null && audioVae != null)
+            {
+                WGNodeData sectionAudio = newVideo.AttachedAudio;
+                if (sectionAudio.DataType == WGNodeData.DT_LATENT_AUDIO)
+                {
+                    sectionAudio = sectionAudio.DecodeLatents(audioVae, true);
+                }
+                if (sectionAudio != null && sectionAudio.DataType == WGNodeData.DT_AUDIO)
+                {
+                    audioChunks.Add(sectionAudio.Path);
+                }
+            }
+            
             previousVideo = newVideo;
         }
 
@@ -162,11 +180,14 @@ public class VideoConcatenator
         WGNodeData result = previousVideo.WithPath(concatenatedVideo);
         result.FPS = videoFps;
         
-        // Use audio from the first video only (simpler approach)
-        // TODO: Implement proper audio concatenation in future
-        if (finalAudio != null)
+        // Concatenate all audio chunks
+        if (audioChunks.Count > 0)
         {
-            result.AttachedAudio = finalAudio;
+            JArray concatenatedAudio = ConcatenateAudioChunks(audioChunks);
+            if (concatenatedAudio != null)
+            {
+                result.AttachedAudio = new WGNodeData(concatenatedAudio, _generator, WGNodeData.DT_AUDIO, _generator.CurrentCompat());
+            }
         }
         
         _generator.CurrentMedia = result;
@@ -242,20 +263,25 @@ public class VideoConcatenator
 
         _generator.CreateImageToVideo(genInfo);
         
-        // Preserve the audio from the video generation result
-        WGNodeData result = _generator.CurrentMedia.AsRawImage(genInfo.Vae);
-        WGNodeData resultAudio = _generator.CurrentMedia.AttachedAudio;
-
+        // After CreateImageToVideo, CurrentMedia is DT_LATENT_AUDIOVIDEO
+        // AsRawImage separates video and audio, attaching audio as DT_LATENT_AUDIO
+        WGNodeData rawResult = _generator.CurrentMedia.AsRawImage(genInfo.Vae);
+        
+        // Cut the transition frames from the beginning
         string cutNode = _generator.CreateNode("ImageFromBatch", new JObject()
         {
-            ["image"] = result.Path,
+            ["image"] = rawResult.Path,
             ["batch_index"] = _transitionFrames,
             ["length"] = frames - _transitionFrames
         });
 
-        WGNodeData finalResult = result.WithPath([cutNode, 0]);
-        // Preserve the attached audio from video generation
-        finalResult.AttachedAudio = resultAudio;
+        WGNodeData finalResult = rawResult.WithPath([cutNode, 0]);
+        
+        // Preserve the attached audio from video generation (it's DT_LATENT_AUDIO)
+        // Will be decoded when needed for final output
+        finalResult.AttachedAudio = rawResult.AttachedAudio;
+        finalResult.Frames = frames - _transitionFrames;
+        finalResult.FPS = fps;
         
         return finalResult;
     }
