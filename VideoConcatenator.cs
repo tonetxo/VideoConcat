@@ -341,7 +341,7 @@ public class VideoConcatenator
         string extractNode = _generator.CreateNode("ImageFromBatch", new JObject()
         {
             ["image"] = video,
-            ["batch_index"] = [startIndexNode, 0],
+            ["batch_index"] = new JArray(startIndexNode, 0),
             ["length"] = frameCount
         });
 
@@ -448,8 +448,8 @@ public class VideoConcatenator
                 // Concatenate with crossfade
                 string concatNode = _generator.CreateNode("AudioConcat", new JObject()
                 {
-                    ["audio1"] = [fadeOutNode, 0],
-                    ["audio2"] = [fadeInNode, 0],
+                    ["audio1"] = new JArray(fadeOutNode, 0),
+                    ["audio2"] = new JArray(fadeInNode, 0),
                     ["crossfade"] = _transitionFrames,
                     ["direction"] = "after"
                 });
