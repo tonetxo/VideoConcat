@@ -7,8 +7,9 @@ Extension for concatenating multiple video sections with temporal and color cohe
 - **Video Concatenation**: Join multiple video sections sequentially
 - **Coherent Color Matching**: Match colors between video sections for visual consistency
 - **Temporal Blending**: Smooth transitions between frames to reduce flickering
-- **Per-Section Prompts**: Configure different prompts for each video section
+- **Per-Section Prompts**: Configure different prompts for each video section (starting from video 2)
 - **Configurable Durations**: Set specific frame counts for each section
+- **Toggle Switch**: Easily enable/disable the extension from the UI
 
 ## Installation
 
@@ -21,12 +22,15 @@ To build:
 
 ## Usage
 
-1. Enable "Video Concatenation" in the parameter group
-2. Add video sections using the UI:
-   - Upload videos or provide video references
-   - Set duration (in frames) for each section
-   - Optionally configure prompts for each section
-3. Configure transition settings:
+1. Enable "Enable Video Concatenation" toggle in the "Video Concatenation" parameter group
+2. Set up Image To Video with a video model and the main prompt (this generates video 1)
+3. Add prompts for subsequent videos using "Section Prompts" separated by `|||`:
+   - Example: `A cat running|||A cat jumping` generates:
+     - Video 1: uses main prompt from Image To Video
+     - Video 2: "A cat running"
+     - Video 3: "A cat jumping"
+4. Optionally configure durations for all sections (comma-separated)
+5. Configure transition settings:
    - **Transition Frames**: Number of frames for crossfade (default: 12)
    - **Enable Color Matching**: Match colors between sections
    - **Color Match Strength**: 0.0-1.0 blend strength
@@ -35,14 +39,19 @@ To build:
 
 ## Parameters
 
-### Video Concat Inputs
-JSON array of video sections, each containing:
-- `video`: base64-encoded video or video reference
-- `duration_frames`: number of frames for this section
-- `prompt`: (optional) text prompt for generation
+### Enable Video Concatenation
+Toggle to enable/disable video concatenation. When enabled, additional videos will be generated and concatenated.
 
 ### Section Prompts
-Prompts for each section separated by `|||`. Example: `A cat walking|||A cat running|||A cat jumping`
+Prompts for video sections 2 and beyond, separated by `|||`. 
+- Video 1 uses the main prompt from "Image To Video"
+- Subsequent videos use the prompts entered here
+- Example: `A cat running|||A cat jumping` generates 3 videos total
+
+### Section Durations
+Durations in frames for each video section (including the first), separated by commas.
+- Example: `25,30,25` for 3 sections
+- If empty, uses default Video Frames for all sections
 
 ### Transition Settings
 - **Transition Frames**: 1-60 frames (default: 12)

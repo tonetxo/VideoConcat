@@ -105,7 +105,21 @@ public class VideoConcatenator
 
         WGNodeData previousVideo = currentMedia;
         List<JArray> videoChunks = [currentMedia.Path];
-        WGNodeData originalAudio = currentMedia.AttachedAudio;
+        List<JArray> audioChunks = [];
+        
+        // Audio VAE for decoding (from first video)
+        WGNodeData audioVae = _generator.CurrentAudioVae;
+        
+        // Store first video's audio - this will be the final audio (not concatenating for now)
+        WGNodeData finalAudio = null;
+        if (currentMedia.AttachedAudio != null)
+        {
+            finalAudio = currentMedia.AttachedAudio;
+            if (finalAudio.DataType == WGNodeData.DT_LATENT_AUDIO && audioVae != null)
+            {
+                finalAudio = finalAudio.DecodeLatents(audioVae, true);
+            }
+        }
         
         int? videoFps = baseFps ?? currentMedia.FPS;
 
@@ -113,14 +127,15 @@ public class VideoConcatenator
         {
             JObject section = _sections[i] as JObject;
             int frames = section["duration_frames"]?.Value<int>() ?? baseFrames ?? 25;
-            string prompt = i < _sectionPrompts.Length && !string.IsNullOrEmpty(_sectionPrompts[i]) 
-                ? _sectionPrompts[i] 
+            int promptIndex = i - 1;
+            string prompt = promptIndex < _sectionPrompts.Length && !string.IsNullOrEmpty(_sectionPrompts[promptIndex]) 
+                ? _sectionPrompts[promptIndex] 
                 : _generator.UserInput.Get(T2IParamTypes.Prompt, "");
             long sectionSeed = baseSeed + i + 1000;
             double? sectionCfg = baseCfg;
             int sectionSteps = baseSteps;
 
-            previousVideo = GenerateContinuationSection(
+            WGNodeData newVideo = GenerateContinuationSection(
                 videoModel, previousVideo, frames, videoFps ?? 24, sectionSteps, sectionCfg,
                 width, height, widthArr, heightArr, prompt, negPrompt, sectionSeed, i
             );
@@ -128,11 +143,12 @@ public class VideoConcatenator
             // Apply color matching to match with previous section
             if (_enableColorMatch && videoChunks.Count > 0)
             {
-                JArray colorMatched = ApplyColorMatching(previousVideo.Path, videoChunks[^1], _colorStrength);
-                previousVideo = previousVideo.WithPath(colorMatched);
+                JArray colorMatched = ApplyColorMatching(newVideo.Path, videoChunks[^1], _colorStrength);
+                newVideo = newVideo.WithPath(colorMatched);
             }
 
-            videoChunks.Add(previousVideo.Path);
+            videoChunks.Add(newVideo.Path);
+            previousVideo = newVideo;
         }
 
         JArray concatenatedVideo = ConcatenateVideoChunks(videoChunks);
@@ -146,10 +162,11 @@ public class VideoConcatenator
         WGNodeData result = previousVideo.WithPath(concatenatedVideo);
         result.FPS = videoFps;
         
-        // Preserve original audio from the first video
-        if (originalAudio != null)
+        // Use audio from the first video only (simpler approach)
+        // TODO: Implement proper audio concatenation in future
+        if (finalAudio != null)
         {
-            result.AttachedAudio = originalAudio;
+            result.AttachedAudio = finalAudio;
         }
         
         _generator.CurrentMedia = result;
@@ -225,7 +242,9 @@ public class VideoConcatenator
 
         _generator.CreateImageToVideo(genInfo);
         
+        // Preserve the audio from the video generation result
         WGNodeData result = _generator.CurrentMedia.AsRawImage(genInfo.Vae);
+        WGNodeData resultAudio = _generator.CurrentMedia.AttachedAudio;
 
         string cutNode = _generator.CreateNode("ImageFromBatch", new JObject()
         {
@@ -234,7 +253,11 @@ public class VideoConcatenator
             ["length"] = frames - _transitionFrames
         });
 
-        return result.WithPath([cutNode, 0]);
+        WGNodeData finalResult = result.WithPath([cutNode, 0]);
+        // Preserve the attached audio from video generation
+        finalResult.AttachedAudio = resultAudio;
+        
+        return finalResult;
     }
 
     private JArray GetWidthNode()
@@ -298,5 +321,29 @@ public class VideoConcatenator
             ["blend_frames"] = _transitionFrames
         });
         return [blendNode, 0];
+    }
+
+    private JArray ConcatenateAudioChunks(List<JArray> chunks)
+    {
+        if (chunks.Count == 0)
+            return null;
+        
+        if (chunks.Count == 1)
+            return chunks[0];
+
+        JArray currentAudio = chunks[0];
+
+        for (int i = 1; i < chunks.Count; i++)
+        {
+            string concatNode = _generator.CreateNode("AudioConcat", new JObject()
+            {
+                ["audio1"] = currentAudio,
+                ["audio2"] = chunks[i],
+                ["direction"] = "after"
+            });
+            currentAudio = [concatNode, 0];
+        }
+
+        return currentAudio;
     }
 }
