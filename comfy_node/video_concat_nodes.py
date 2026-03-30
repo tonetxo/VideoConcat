@@ -373,114 +373,97 @@ class EmptyLatentVideo:
         return ({"samples": latent, "length": length},)
 
 
-class AudioFade:
+class AudioCrossFade:
     """
-    Applies fade in or fade out to audio.
-    Uses ComfyUI's native audio processing.
+    Crossfade between two audio tracks during an overlap region.
+    This mirrors the video crossfade behavior for smooth audio transitions.
     """
 
     @classmethod
     def INPUT_TYPES(s):
         return {
             "required": {
-                "audio": ("AUDIO",),
-                "fade_length_samples": (
+                "audio_a": ("AUDIO",),
+                "audio_b": ("AUDIO",),
+                "crossfade_samples": (
                     "INT",
                     {
-                        "default": 8,
+                        "default": 882,
                         "min": 1,
-                        "max": 1000,
-                        "tooltip": "Number of audio samples for the fade (use video frames * sample_rate/fps for smooth match).",
-                    },
-                ),
-                "fade_type": (
-                    ["in", "out", "inout"],
-                    {
-                        "default": "out",
-                        "tooltip": "Type of fade: in, out, or both (inout).",
+                        "max": 88200,
+                        "tooltip": "Number of audio samples for crossfade (882 = ~20ms at 44.1kHz)",
                     },
                 ),
             }
         }
 
     RETURN_TYPES = ("AUDIO",)
-    FUNCTION = "apply_fade"
+    FUNCTION = "crossfade"
     CATEGORY = "SwarmUI/audio"
-    DESCRIPTION = "Apply fade in/out to audio for smooth transitions."
+    DESCRIPTION = "Crossfade two audio tracks. Audio A fades out while Audio B fades in during overlap."
 
-    def apply_fade(self, audio, fade_length_samples, fade_type):
-        """
-        Apply audio fade.
+    def crossfade(self, audio_a, audio_b, crossfade_samples):
+        if crossfade_samples <= 0:
+            return (audio_a,)
 
-        Args:
-            audio: Audio tensor (waveform)
-            fade_length_samples: Number of samples for fade
-            fade_type: 'in', 'out', or 'inout'
-
-        Returns:
-            Faded audio tensor
-        """
-        if fade_length_samples <= 0:
-            return (audio,)
-
-        # Audio is typically shape (channels, samples) or (samples,)
-        waveform = audio.get("waveform", audio) if isinstance(audio, dict) else audio
+        waveform_a = (
+            audio_a.get("waveform", audio_a) if isinstance(audio_a, dict) else audio_a
+        )
+        waveform_b = (
+            audio_b.get("waveform", audio_b) if isinstance(audio_b, dict) else audio_b
+        )
         sample_rate = (
-            audio.get("sample_rate", 44100) if isinstance(audio, dict) else 44100
+            audio_a.get("sample_rate", 44100) if isinstance(audio_a, dict) else 44100
         )
 
-        # Get total samples
-        total_samples = (
-            waveform.shape[-1] if hasattr(waveform, "shape") else len(waveform)
+        waveform_a_2d = waveform_a if waveform_a.dim() > 1 else waveform_a.unsqueeze(0)
+        waveform_b_2d = waveform_b if waveform_b.dim() > 1 else waveform_b.unsqueeze(0)
+
+        samples_a = waveform_a_2d.shape[-1]
+        samples_b = waveform_b_2d.shape[-1]
+        crossfade = min(crossfade_samples, samples_a, samples_b)
+
+        if crossfade <= 0:
+            return (audio_a,)
+
+        channels_a = waveform_a_2d.shape[0]
+        channels_b = waveform_b_2d.shape[0]
+
+        if channels_a > channels_b:
+            waveform_b_2d = waveform_b_2d.repeat(channels_a // channels_b, 1)
+        elif channels_b > channels_a:
+            waveform_a_2d = waveform_a_2d.repeat(channels_b // channels_a, 1)
+
+        num_channels = waveform_a_2d.shape[0]
+
+        non_overlap_a = samples_a - crossfade
+        total_samples = samples_a + samples_b - crossfade
+
+        result = torch.zeros(
+            (num_channels, total_samples),
+            dtype=waveform_a_2d.dtype,
+            device=waveform_a_2d.device,
         )
-        fade_samples = min(fade_length_samples, total_samples // 2)
 
-        if fade_samples <= 0:
-            return (audio,)
+        result[:, :non_overlap_a] = waveform_a_2d[:, :non_overlap_a]
 
-        # Create fade envelope as tensor
-        if fade_type == "in":
-            # Fade in: 0 to 1 at start
-            fade_in = torch.linspace(
-                0.0, 1.0, fade_samples, dtype=waveform.dtype, device=waveform.device
-            )
-            envelope = torch.ones(
-                total_samples, dtype=waveform.dtype, device=waveform.device
-            )
-            envelope[:fade_samples] = fade_in
-        elif fade_type == "out":
-            # Fade out: 1 to 0 at end
-            fade_out = torch.linspace(
-                1.0, 0.0, fade_samples, dtype=waveform.dtype, device=waveform.device
-            )
-            envelope = torch.ones(
-                total_samples, dtype=waveform.dtype, device=waveform.device
-            )
-            envelope[-fade_samples:] = fade_out
-        else:  # inout
-            # Both fade in and fade out
-            fade_in = torch.linspace(
-                0.0, 1.0, fade_samples, dtype=waveform.dtype, device=waveform.device
-            )
-            fade_out = torch.linspace(
-                1.0, 0.0, fade_samples, dtype=waveform.dtype, device=waveform.device
-            )
-            envelope = torch.ones(
-                total_samples, dtype=waveform.dtype, device=waveform.device
-            )
-            envelope[:fade_samples] = fade_in
-            envelope[-fade_samples:] = fade_out
+        fade_out = torch.linspace(
+            1.0, 0.0, crossfade, dtype=waveform_a_2d.dtype, device=waveform_a_2d.device
+        )
+        fade_in = torch.linspace(
+            0.0, 1.0, crossfade, dtype=waveform_a_2d.dtype, device=waveform_a_2d.device
+        )
 
-        # Apply envelope to all channels
-        if waveform.dim() > 1:
-            # Shape: (channels, samples) or (batch, channels, samples)
-            envelope = envelope.unsqueeze(0)
-            if waveform.dim() > 2:
-                envelope = envelope.unsqueeze(0)
+        overlap_start = non_overlap_a
+        overlap_end = samples_a
+        result[:, overlap_start:overlap_end] = (
+            waveform_a_2d[:, non_overlap_a:] * fade_out
+            + waveform_b_2d[:, :crossfade] * fade_in
+        )
 
-        result = waveform * envelope
+        result[:, samples_a:] = waveform_b_2d[:, crossfade:]
 
-        if isinstance(audio, dict):
+        if isinstance(audio_a, dict):
             return ({"waveform": result, "sample_rate": sample_rate},)
         return (result,)
 
@@ -492,7 +475,7 @@ NODE_CLASS_MAPPINGS = {
     "VideoCrossFadeTransition": VideoCrossFadeTransition,
     "VideoBatch": VideoBatch,
     "EmptyLatentVideo": EmptyLatentVideo,
-    "AudioFade": AudioFade,
+    "AudioCrossFade": AudioCrossFade,
 }
 
 # Human-readable display names
@@ -502,5 +485,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "VideoCrossFadeTransition": "Video CrossFade Transition (SwarmUI)",
     "VideoBatch": "Video Batch (SwarmUI)",
     "EmptyLatentVideo": "Empty Latent Video (SwarmUI)",
-    "AudioFade": "Audio Fade (SwarmUI)",
+    "AudioCrossFade": "Audio CrossFade (SwarmUI)",
 }

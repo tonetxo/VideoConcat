@@ -411,7 +411,6 @@ public class VideoConcatenator
 
         if (!_enableAudioCrossfade)
         {
-            // Simple concatenation without crossfade
             JArray currentAudio = chunks[0];
             for (int i = 1; i < chunks.Count; i++)
             {
@@ -426,63 +425,19 @@ public class VideoConcatenator
             return currentAudio;
         }
 
-        // Crossfade audio: blend overlapping regions
-        List<JArray> processedChunks = new List<JArray>();
-        
-        for (int i = 0; i < chunks.Count; i++)
+        JArray result = chunks[0];
+        int? videoFps = _generator.UserInput.TryGet(T2IParamTypes.VideoFPS, out int fpsRaw) ? fpsRaw : null;
+        int fps = videoFps ?? 24;
+        int audioCrossfadeSamples = _audioCrossfadeFrames * (44100 / fps);
+        for (int i = 1; i < chunks.Count; i++)
         {
-            if (i == 0)
+            string crossfadeNode = _generator.CreateNode("AudioCrossFade", new JObject()
             {
-                // First chunk: fade out at end
-                string fadeNode = _generator.CreateNode("AudioFade", new JObject()
-                {
-                    ["audio"] = chunks[i],
-                    ["fade_length_samples"] = _audioCrossfadeFrames,
-                    ["fade_type"] = "out"
-                });
-                processedChunks.Add(new JArray(fadeNode, 0));
-            }
-            else if (i == chunks.Count - 1)
-            {
-                // Last chunk: fade in at start
-                string fadeNode = _generator.CreateNode("AudioFade", new JObject()
-                {
-                    ["audio"] = chunks[i],
-                    ["fade_length_samples"] = _audioCrossfadeFrames,
-                    ["fade_type"] = "in"
-                });
-                processedChunks.Add(new JArray(fadeNode, 0));
-            }
-            else
-            {
-                // Middle chunks: fade in at start, fade out at end
-                string fadeInNode = _generator.CreateNode("AudioFade", new JObject()
-                {
-                    ["audio"] = chunks[i],
-                    ["fade_length_samples"] = _audioCrossfadeFrames,
-                    ["fade_type"] = "in"
-                });
-                string fadeOutNode = _generator.CreateNode("AudioFade", new JObject()
-                {
-                    ["audio"] = new JArray(fadeInNode, 0),
-                    ["fade_length_samples"] = _audioCrossfadeFrames,
-                    ["fade_type"] = "out"
-                });
-                processedChunks.Add(new JArray(fadeOutNode, 0));
-            }
-        }
-        
-        // Concatenate all processed chunks
-        JArray result = processedChunks[0];
-        for (int i = 1; i < processedChunks.Count; i++)
-        {
-            string concatNode = _generator.CreateNode("AudioConcat", new JObject()
-            {
-                ["audio1"] = result,
-                ["audio2"] = processedChunks[i],
-                ["direction"] = "after"
+                ["audio_a"] = result,
+                ["audio_b"] = chunks[i],
+                ["crossfade_samples"] = audioCrossfadeSamples
             });
-            result = new JArray(concatNode, 0);
+            result = new JArray(crossfadeNode, 0);
         }
         
         return result;

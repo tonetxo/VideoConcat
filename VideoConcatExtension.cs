@@ -209,10 +209,9 @@ public class VideoConcatExtension : Extension
 
         VideoConcatAudioCrossfadeFrames = T2IParamTypes.Register<int>(new T2IParamType(
             Name: "Audio Crossfade Frames",
-            Description: "Number of frames for audio crossfade.\n" +
-                         "Lower values = sharper audio transitions.\n" +
-                         "Higher values = smoother but may lose audio sync.\n" +
-                         "Recommended: 6-12 frames (or match Transition Frames).",
+            Description: "Number of VIDEO FRAMES for audio crossfade (converted to audio samples automatically).\n" +
+                         "The audio crossfade duration will match this many video frames.\n" +
+                         "Recommended: Match Transition Frames for sync, or use lower for quicker audio transitions.",
             Default: "8",
             Min: 1,
             Max: 60,
