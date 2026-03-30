@@ -432,12 +432,14 @@ class AudioCrossFade:
         channels_a = waveform_a_2d.shape[0]
         channels_b = waveform_b_2d.shape[0]
 
-        if channels_a > channels_b:
-            waveform_b_2d = waveform_b_2d.repeat(channels_a // channels_b, 1)
-        elif channels_b > channels_a:
-            waveform_a_2d = waveform_a_2d.repeat(channels_b // channels_a, 1)
+        # Match channel counts - expand lower to match higher
+        if channels_a < channels_b:
+            waveform_a_2d = waveform_a_2d.repeat(channels_b, 1)
+        elif channels_b < channels_a:
+            waveform_b_2d = waveform_b_2d.repeat(channels_a, 1)
 
-        num_channels = max(channels_a, channels_b)
+        # Now both have same number of channels
+        num_channels = waveform_a_2d.shape[0]
 
         non_overlap_a = samples_a - crossfade
         total_samples = samples_a + samples_b - crossfade
