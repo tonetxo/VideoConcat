@@ -1,10 +1,13 @@
 """
 Video Concatenation nodes for SwarmUI extension.
-Provides video color matching, temporal blending, and concatenation.
+Version: 2.0.0 - AudioCrossFade with proper channel handling
 """
 
 import torch
 import numpy as np
+
+
+__version__ = "2.0.0"
 
 
 class VideoColorMatch:
