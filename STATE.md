@@ -16,7 +16,7 @@ Extensión para SwarmUI que permite concatenar múltiples secciones de video con
   3. Generar videos de continuación para cada prompt
   4. Aplicar crossfade transitions entre videos
   5. Aplicar color matching y temporal blending
-  6. Concatenar audio con fade in/out
+  6. Concatenar audio con crossfade
 
 ## Flujo de Prompts
 
@@ -49,7 +49,7 @@ src/Extensions/VideoConcat/
 3. ✅ Crossfade transitions implementadas
 4. ✅ Color matching usando frames de transición como referencia
 5. ✅ Temporal blending solo en zonas de transición
-6. ✅ Audio handling con fade in/out
+6. ✅ Audio crossfade con overlap blending (no fade in/out)
 7. ✅ Modos configurables de transición
 
 ## Parámetros
@@ -65,7 +65,8 @@ src/Extensions/VideoConcat/
 | `Color Match Strength` | double | 0.5 | Intensidad del color matching (0-1) |
 | `Enable Temporal Blending` | bool | true | Blending temporal en transiciones |
 | `Temporal Blend Strength` | double | 0.5 | Intensidad del blending (0-1) |
-| `Enable Audio Fade` | bool | true | Fade in/out en audio de transiciones |
+| `Enable Audio Fade` | bool | true | Crossfade de audio en transiciones |
+| `Audio Crossfade Frames` | int | 8 | Frames de video (convertidos a samples automáticamente) |
 
 ## Flujo de Transiciones
 
@@ -93,17 +94,18 @@ Resultado (include_overlap): 121 + 121 = 242 frames (con overlap)
 - No afecta el contenido central del video
 - Reduce flickering sin causar efecto ghost
 
-### Audio Fade
-- Fade out al final del audio anterior
-- Fade in al inicio del audio siguiente
-- Crossfade en la zona de transición
+### Audio Crossfade
+- Cada chunk mantiene su audio completo
+- Durante el overlap: `audio_a * (1-t) + audio_b * t`
+- Convierte frames de video a samples: `frames * (44100 / fps)`
+- Mismo comportamiento que crossfade de video
 
 ## Nodos ComfyUI
 
 - `VideoColorMatch` - Matching de histograma de color
 - `VideoTemporalBlend` - Suavizado temporal en transiciones
 - `VideoCrossFadeTransition` - Transiciones crossfade con modos
-- `AudioFade` - Fade in/out para audio
+- `AudioCrossFade` - Crossfade de audio con overlap blending
 - `VideoBatch` - Batching de frames
 
 ## Flujo de Trabajo
@@ -116,18 +118,19 @@ Resultado (include_overlap): 121 + 121 = 242 frames (con overlap)
      - Aplica color matching con frames de referencia
    - Concatena todos con `VideoCrossFadeTransition`
    - Aplica temporal blending en transiciones
-   - Concatena audio con fade in/out
+   - Concatena audio con `AudioCrossFade`
 
 ## Notas Técnicas
 
 - Crossfade elimina cortes bruscos entre videos
 - Color matching usa frames cercanos, no videos completos
 - Temporal blending solo en boundaries, no en todo el video
-- Audio fade suaviza transiciones de sonido
+- Audio crossfade usa overlap blending, no fade in/out aislados
 
 ## Commits
 
-1. `58f7cfd` - Implement proper audio handling
-2. `8479f05` - Remove redundant Toggleable
-3. `3141983` - Fix toggle and prompt logic
-4. `ec46789` - Major improvements: crossfade transitions, configurable modes, audio fade
+1. `accbbcc1` - Fix audio crossfade: use proper overlap blending like video
+2. `58f7cfd` - Implement proper audio handling
+3. `8479f05` - Remove redundant Toggleable
+4. `3141983` - Fix toggle and prompt logic
+5. `ec46789` - Major improvements: crossfade transitions, configurable modes, audio fade
