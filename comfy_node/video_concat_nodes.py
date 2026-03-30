@@ -429,44 +429,66 @@ class AudioCrossFade:
         if crossfade <= 0:
             return (audio_a,)
 
-        channels_a = waveform_a_2d.shape[0]
-        channels_b = waveform_b_2d.shape[0]
+        num_channels_a = waveform_a_2d.shape[0]
+        num_channels_b = waveform_b_2d.shape[0]
 
-        # Match channel counts - expand lower to match higher
-        if channels_a < channels_b:
-            waveform_a_2d = waveform_a_2d.repeat(channels_b, 1)
-        elif channels_b < channels_a:
-            waveform_b_2d = waveform_b_2d.repeat(channels_a, 1)
+        # Convert to mono if needed (average channels) to avoid channel mismatch issues
+        if num_channels_a > 1:
+            waveform_a_mono = waveform_a_2d.mean(dim=0, keepdim=True)
+        else:
+            waveform_a_mono = waveform_a_2d
 
-        # Now both have same number of channels
-        num_channels = waveform_a_2d.shape[0]
+        if num_channels_b > 1:
+            waveform_b_mono = waveform_b_2d.mean(dim=0, keepdim=True)
+        else:
+            waveform_b_mono = waveform_b_2d
 
+        # Determine output channels (use the higher channel count)
+        output_channels = max(num_channels_a, num_channels_b)
+
+        # Calculate output length
         non_overlap_a = samples_a - crossfade
         total_samples = samples_a + samples_b - crossfade
 
-        result = torch.zeros(
-            (num_channels, total_samples),
-            dtype=waveform_a_2d.dtype,
-            device=waveform_a_2d.device,
+        # Create mono result first
+        result_mono = torch.zeros(
+            (1, total_samples),
+            dtype=waveform_a_mono.dtype,
+            device=waveform_a_mono.device,
         )
 
-        result[:, :non_overlap_a] = waveform_a_2d[:, :non_overlap_a]
+        # Copy non-overlapping part of audio_a
+        result_mono[0, :non_overlap_a] = waveform_a_mono[0, :non_overlap_a]
 
+        # Create crossfade in overlap region
         fade_out = torch.linspace(
-            1.0, 0.0, crossfade, dtype=waveform_a_2d.dtype, device=waveform_a_2d.device
+            1.0,
+            0.0,
+            crossfade,
+            dtype=waveform_a_mono.dtype,
+            device=waveform_a_mono.device,
         )
         fade_in = torch.linspace(
-            0.0, 1.0, crossfade, dtype=waveform_a_2d.dtype, device=waveform_a_2d.device
+            0.0,
+            1.0,
+            crossfade,
+            dtype=waveform_b_mono.dtype,
+            device=waveform_b_mono.device,
         )
 
-        overlap_start = non_overlap_a
-        overlap_end = samples_a
-        result[:, overlap_start:overlap_end] = (
-            waveform_a_2d[:, non_overlap_a:] * fade_out
-            + waveform_b_2d[:, :crossfade] * fade_in
+        result_mono[0, non_overlap_a:samples_a] = (
+            waveform_a_mono[0, non_overlap_a:] * fade_out
+            + waveform_b_mono[0, :crossfade] * fade_in
         )
 
-        result[:, samples_a:] = waveform_b_2d[:, crossfade:]
+        # Copy remaining part of audio_b
+        result_mono[0, samples_a:] = waveform_b_mono[0, crossfade:]
+
+        # Expand back to output channels if needed
+        if output_channels > 1:
+            result = result_mono.repeat(output_channels, 1)
+        else:
+            result = result_mono
 
         if isinstance(audio_a, dict):
             return ({"waveform": result, "sample_rate": sample_rate},)
