@@ -419,29 +419,38 @@ class AudioCrossFade:
             audio_a.get("sample_rate", 44100) if isinstance(audio_a, dict) else 44100
         )
 
-        waveform_a_2d = waveform_a if waveform_a.dim() > 1 else waveform_a.unsqueeze(0)
-        waveform_b_2d = waveform_b if waveform_b.dim() > 1 else waveform_b.unsqueeze(0)
+        # ComfyUI audio can be (batch, channels, samples) or (channels, samples)
+        # Normalize to (channels, samples)
+        if waveform_a.dim() == 3:
+            waveform_a = waveform_a.squeeze(0)
+        elif waveform_a.dim() == 1:
+            waveform_a = waveform_a.unsqueeze(0)
 
-        samples_a = waveform_a_2d.shape[-1]
-        samples_b = waveform_b_2d.shape[-1]
+        if waveform_b.dim() == 3:
+            waveform_b = waveform_b.squeeze(0)
+        elif waveform_b.dim() == 1:
+            waveform_b = waveform_b.unsqueeze(0)
+
+        samples_a = waveform_a.shape[-1]
+        samples_b = waveform_b.shape[-1]
         crossfade = min(crossfade_samples, samples_a, samples_b)
 
         if crossfade <= 0:
             return (audio_a,)
 
-        num_channels_a = waveform_a_2d.shape[0]
-        num_channels_b = waveform_b_2d.shape[0]
+        num_channels_a = waveform_a.shape[0]
+        num_channels_b = waveform_b.shape[0]
 
-        # Convert to mono if needed (average channels) to avoid channel mismatch issues
+        # Convert to mono by averaging channels
         if num_channels_a > 1:
-            waveform_a_mono = waveform_a_2d.mean(dim=0, keepdim=True)
+            waveform_a_mono = waveform_a.mean(dim=0, keepdim=True)
         else:
-            waveform_a_mono = waveform_a_2d
+            waveform_a_mono = waveform_a
 
         if num_channels_b > 1:
-            waveform_b_mono = waveform_b_2d.mean(dim=0, keepdim=True)
+            waveform_b_mono = waveform_b.mean(dim=0, keepdim=True)
         else:
-            waveform_b_mono = waveform_b_2d
+            waveform_b_mono = waveform_b
 
         # Determine output channels (use the higher channel count)
         output_channels = max(num_channels_a, num_channels_b)
