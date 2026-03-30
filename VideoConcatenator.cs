@@ -87,6 +87,8 @@ public class VideoConcatenator
             throw new SwarmUserErrorException("Video concatenation requires a Video Model selected in 'Image To Video'");
         }
 
+        _transitionFrames = GetValidTransitionFrames(_transitionFrames, videoModel);
+
         WGNodeData currentMedia = _generator.CurrentMedia;
         if (currentMedia.Frames == null || currentMedia.Frames < 1)
         {
@@ -184,14 +186,17 @@ public class VideoConcatenator
 
         if (_enableColorMatch && videoChunks.Count > 1)
         {
+            double adjustedStrength = GetAdjustedColorStrength(videoModel, _colorStrength);
+            int adjustedRefFrames = GetAdjustedColorRefFrames(videoModel, _transitionFrames);
+            
             for (int i = 1; i < videoChunks.Count; i++)
             {
                 WGNodeData previousChunk = videoChunks[i - 1];
                 WGNodeData currentChunk = videoChunks[i];
                 
-                JArray refFrames = ExtractLastFrames(previousChunk.Path, _transitionFrames);
+                JArray refFrames = ExtractLastFrames(previousChunk.Path, adjustedRefFrames);
                 
-                JArray colorMatched = ApplyColorMatching(currentChunk.Path, refFrames, _colorStrength);
+                JArray colorMatched = ApplyColorMatching(currentChunk.Path, refFrames, adjustedStrength);
                 videoChunks[i] = currentChunk.WithPath(colorMatched);
             }
         }
@@ -441,5 +446,56 @@ public class VideoConcatenator
         }
         
         return result;
+    }
+
+    private int GetValidTransitionFrames(int frames, T2IModel model)
+    {
+        string compatClass = model?.ModelClass?.CompatClass?.ID ?? "";
+
+        if (compatClass.StartsWith("wan-21") || compatClass.StartsWith("wan-22"))
+        {
+            int remainder = (frames - 1) % 4;
+            if (remainder == 0)
+            {
+                return frames;
+            }
+            int lower = frames - remainder;
+            int upper = lower + 4;
+            int validFrames = (frames - lower) < (upper - frames) ? lower : upper;
+            validFrames = Math.Max(5, validFrames);
+            Logs.Info($"[VideoConcat] Adjusted transition frames from {frames} to {validFrames} for Wan model (requires 4n+1 format)");
+            return validFrames;
+        }
+
+        return frames;
+    }
+
+    private double GetAdjustedColorStrength(T2IModel model, double baseStrength)
+    {
+        string compatClass = model?.ModelClass?.CompatClass?.ID ?? "";
+
+        if (compatClass.StartsWith("wan-21") || compatClass.StartsWith("wan-22"))
+        {
+            double adjusted = Math.Min(1.0, baseStrength * 1.4);
+            Logs.Info($"[VideoConcat] Adjusted color match strength from {baseStrength:F2} to {adjusted:F2} for Wan model");
+            return adjusted;
+        }
+
+        return baseStrength;
+    }
+
+    private int GetAdjustedColorRefFrames(T2IModel model, int transitionFrames)
+    {
+        string compatClass = model?.ModelClass?.CompatClass?.ID ?? "";
+
+        if (compatClass.StartsWith("wan-21") || compatClass.StartsWith("wan-22"))
+        {
+            int adjustedFrames = (int)(transitionFrames * 1.5);
+            adjustedFrames = GetValidTransitionFrames(adjustedFrames, model);
+            Logs.Info($"[VideoConcat] Adjusted color reference frames from {transitionFrames} to {adjustedFrames} for Wan model");
+            return adjustedFrames;
+        }
+
+        return transitionFrames;
     }
 }

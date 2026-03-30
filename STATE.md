@@ -1,6 +1,6 @@
 # VideoConcat Extension - Estado Actual
 
-**Última actualización:** 30 de marzo de 2026
+**Última actualización:** 31 de marzo de 2026
 
 ## Goal
 
@@ -134,3 +134,19 @@ Resultado (include_overlap): 121 + 121 = 242 frames (con overlap)
 3. `8479f05` - Remove redundant Toggleable
 4. `3141983` - Fix toggle and prompt logic
 5. `ec46789` - Major improvements: crossfade transitions, configurable modes, audio fade
+
+## Auto-ajustes por Modelo
+
+Los ajustes se aplican automáticamente según el modelo detectado (`videoModel.ModelClass.CompatClass.ID`).
+
+### Transition Frames
+- **Wan (2.1/2.2)**: Requiere frames en formato 4n+1 (5, 9, 13, 17...). Se auto-ajusta al valor más cercano.
+- **LTXV**: Sin cambios (ya funciona correctamente).
+- Ejemplo: Si el usuario entra 12 frames para Wan, se auto-ajusta a 13.
+
+### Color Matching (solo Wan)
+- **Strength**: Multiplicado x1.4 (ej: 0.5 → 0.7) para compensar el baseline gris diferente
+- **Reference Frames**: Aumentados x1.5 (ej: 13 → 19 frames) para mejor referencia de color
+- **LTXV**: Mantiene los valores originales del usuario
+
+**Motivo:** Wan genera desde un baseline gris (0.5) mientras LTXV usa `LTXVPreprocess` (CRF compression) que suaviza colores antes del encode.
