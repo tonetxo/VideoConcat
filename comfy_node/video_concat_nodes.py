@@ -384,14 +384,13 @@ class AudioFade:
         return {
             "required": {
                 "audio": ("AUDIO",),
-                "fade_length": (
-                    "FLOAT",
+                "fade_length_samples": (
+                    "INT",
                     {
-                        "default": 0.5,
-                        "min": 0.0,
-                        "max": 10.0,
-                        "step": 0.1,
-                        "tooltip": "Duration of the fade in seconds.",
+                        "default": 8,
+                        "min": 1,
+                        "max": 1000,
+                        "tooltip": "Number of audio samples for the fade (use video frames * sample_rate/fps for smooth match).",
                     },
                 ),
                 "fade_type": (
@@ -409,51 +408,76 @@ class AudioFade:
     CATEGORY = "SwarmUI/audio"
     DESCRIPTION = "Apply fade in/out to audio for smooth transitions."
 
-    def apply_fade(self, audio, fade_length, fade_type):
+    def apply_fade(self, audio, fade_length_samples, fade_type):
         """
         Apply audio fade.
 
         Args:
             audio: Audio tensor (waveform)
-            fade_length: Duration in seconds
+            fade_length_samples: Number of samples for fade
             fade_type: 'in', 'out', or 'inout'
 
         Returns:
             Faded audio tensor
         """
-        if fade_length <= 0:
+        if fade_length_samples <= 0:
             return (audio,)
 
         # Audio is typically shape (channels, samples) or (samples,)
-        # Apply envelope multiplication for fade
         waveform = audio.get("waveform", audio) if isinstance(audio, dict) else audio
-
-        # Calculate fade samples
         sample_rate = (
             audio.get("sample_rate", 44100) if isinstance(audio, dict) else 44100
         )
-        fade_samples = int(fade_length * sample_rate)
 
-        # Create fade envelope
+        # Get total samples
+        total_samples = (
+            waveform.shape[-1] if hasattr(waveform, "shape") else len(waveform)
+        )
+        fade_samples = min(fade_length_samples, total_samples // 2)
+
+        if fade_samples <= 0:
+            return (audio,)
+
+        # Create fade envelope as tensor
         if fade_type == "in":
-            # Fade in: 0 to 1
-            fade_in = torch.linspace(0, 1, min(fade_samples, waveform.shape[-1]))
-            envelope = torch.ones(waveform.shape[-1])
-            envelope[: len(fade_in)] = fade_in
+            # Fade in: 0 to 1 at start
+            fade_in = torch.linspace(
+                0.0, 1.0, fade_samples, dtype=waveform.dtype, device=waveform.device
+            )
+            envelope = torch.ones(
+                total_samples, dtype=waveform.dtype, device=waveform.device
+            )
+            envelope[:fade_samples] = fade_in
         elif fade_type == "out":
-            # Fade out: 1 to 0
-            fade_out = torch.linspace(1, 0, min(fade_samples, waveform.shape[-1]))
-            envelope = torch.ones(waveform.shape[-1])
-            envelope[-len(fade_out) :] = fade_out
+            # Fade out: 1 to 0 at end
+            fade_out = torch.linspace(
+                1.0, 0.0, fade_samples, dtype=waveform.dtype, device=waveform.device
+            )
+            envelope = torch.ones(
+                total_samples, dtype=waveform.dtype, device=waveform.device
+            )
+            envelope[-fade_samples:] = fade_out
         else:  # inout
             # Both fade in and fade out
-            fade_in = torch.linspace(0, 1, min(fade_samples, waveform.shape[-1] // 2))
-            fade_out = torch.linspace(1, 0, min(fade_samples, waveform.shape[-1] // 2))
-            envelope = torch.ones(waveform.shape[-1])
-            envelope[: len(fade_in)] = fade_in
-            envelope[-len(fade_out) :] = fade_out
+            fade_in = torch.linspace(
+                0.0, 1.0, fade_samples, dtype=waveform.dtype, device=waveform.device
+            )
+            fade_out = torch.linspace(
+                1.0, 0.0, fade_samples, dtype=waveform.dtype, device=waveform.device
+            )
+            envelope = torch.ones(
+                total_samples, dtype=waveform.dtype, device=waveform.device
+            )
+            envelope[:fade_samples] = fade_in
+            envelope[-fade_samples:] = fade_out
 
-        # Apply envelope
+        # Apply envelope to all channels
+        if waveform.dim() > 1:
+            # Shape: (channels, samples) or (batch, channels, samples)
+            envelope = envelope.unsqueeze(0)
+            if waveform.dim() > 2:
+                envelope = envelope.unsqueeze(0)
+
         result = waveform * envelope
 
         if isinstance(audio, dict):

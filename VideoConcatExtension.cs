@@ -22,6 +22,7 @@ public class VideoConcatExtension : Extension
     public static T2IRegisteredParam<bool> VideoConcatEnableTemporalBlend;
     public static T2IRegisteredParam<double> VideoConcatTemporalStrength;
     public static T2IRegisteredParam<bool> VideoConcatEnableAudioFade;
+    public static T2IRegisteredParam<int> VideoConcatAudioCrossfadeFrames;
 
     public override void OnPreInit()
     {
@@ -196,13 +197,30 @@ public class VideoConcatExtension : Extension
         ));
 
         VideoConcatEnableAudioFade = T2IParamTypes.Register<bool>(new T2IParamType(
-            Name: "Enable Audio Fade",
-            Description: "Apply fade in/out to audio at transitions for smooth audio blending.",
+            Name: "Enable Audio Crossfade",
+            Description: "Crossfade audio between video sections for smooth transitions.\n" +
+                         "Mixes audio during transitions just like video crossfade.",
             Default: "true",
             Group: VideoConcatGroup,
             OrderPriority: priority++,
             FeatureFlag: "video",
             DoNotPreview: true
+        ));
+
+        VideoConcatAudioCrossfadeFrames = T2IParamTypes.Register<int>(new T2IParamType(
+            Name: "Audio Crossfade Frames",
+            Description: "Number of frames for audio crossfade.\n" +
+                         "Lower values = sharper audio transitions.\n" +
+                         "Higher values = smoother but may lose audio sync.\n" +
+                         "Recommended: 6-12 frames (or match Transition Frames).",
+            Default: "8",
+            Min: 1,
+            Max: 60,
+            Group: VideoConcatGroup,
+            OrderPriority: priority++,
+            FeatureFlag: "video",
+            DoNotPreview: true,
+            DependNonDefault: VideoConcatEnableAudioFade.Type.ID
         ));
     }
 
@@ -252,7 +270,8 @@ public class VideoConcatExtension : Extension
             double colorStrength = g.UserInput.Get(VideoConcatColorStrength, 0.5);
             bool enableTemporalBlend = g.UserInput.Get(VideoConcatEnableTemporalBlend, true);
             double temporalStrength = g.UserInput.Get(VideoConcatTemporalStrength, 0.5);
-            bool enableAudioFade = g.UserInput.Get(VideoConcatEnableAudioFade, true);
+            bool enableAudioCrossfade = g.UserInput.Get(VideoConcatEnableAudioFade, true);
+            int audioCrossfadeFrames = g.UserInput.Get(VideoConcatAudioCrossfadeFrames, 8);
 
             try
             {
@@ -269,7 +288,7 @@ public class VideoConcatExtension : Extension
                     .SetFrameMode(frameMode)
                     .SetColorMatching(enableColorMatch, colorStrength)
                     .SetTemporalBlending(enableTemporalBlend, temporalStrength)
-                    .SetAudioFade(enableAudioFade, transitionFrames)
+                    .SetAudioCrossfade(enableAudioCrossfade, audioCrossfadeFrames)
                     .Concatenate();
             }
             catch (Exception ex)
