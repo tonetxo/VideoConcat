@@ -186,17 +186,27 @@ public class VideoConcatenator
 
         if (_enableColorMatch && videoChunks.Count > 1)
         {
-            double adjustedStrength = GetAdjustedColorStrength(videoModel, _colorStrength);
-            int adjustedRefFrames = GetAdjustedColorRefFrames(videoModel, _transitionFrames);
+            string compatClass = videoModel?.ModelClass?.CompatClass?.ID ?? "";
+            bool isWan = compatClass.StartsWith("wan-21") || compatClass.StartsWith("wan-22");
+            
+            double strength = _colorStrength;
+            int refFrameCount = _transitionFrames;
+            
+            if (isWan)
+            {
+                strength = Math.Min(1.0, _colorStrength * 1.4);
+                refFrameCount = GetValidTransitionFrames((int)(_transitionFrames * 1.5), videoModel);
+                Logs.Info($"[VideoConcat] Wan color match: strength {_colorStrength:F2}->{strength:F2}, refFrames {_transitionFrames}->{refFrameCount}");
+            }
             
             for (int i = 1; i < videoChunks.Count; i++)
             {
                 WGNodeData previousChunk = videoChunks[i - 1];
                 WGNodeData currentChunk = videoChunks[i];
                 
-                JArray refFrames = ExtractLastFrames(previousChunk.Path, adjustedRefFrames);
+                JArray refFrames = ExtractLastFrames(previousChunk.Path, refFrameCount);
                 
-                JArray colorMatched = ApplyColorMatching(currentChunk.Path, refFrames, adjustedStrength);
+                JArray colorMatched = ApplyColorMatching(currentChunk.Path, refFrames, strength);
                 videoChunks[i] = currentChunk.WithPath(colorMatched);
             }
         }
@@ -468,34 +478,5 @@ public class VideoConcatenator
         }
 
         return frames;
-    }
-
-    private double GetAdjustedColorStrength(T2IModel model, double baseStrength)
-    {
-        string compatClass = model?.ModelClass?.CompatClass?.ID ?? "";
-
-        if (compatClass.StartsWith("wan-21") || compatClass.StartsWith("wan-22"))
-        {
-            double adjusted = Math.Min(1.0, baseStrength * 1.4);
-            Logs.Info($"[VideoConcat] Adjusted color match strength from {baseStrength:F2} to {adjusted:F2} for Wan model");
-            return adjusted;
-        }
-
-        return baseStrength;
-    }
-
-    private int GetAdjustedColorRefFrames(T2IModel model, int transitionFrames)
-    {
-        string compatClass = model?.ModelClass?.CompatClass?.ID ?? "";
-
-        if (compatClass.StartsWith("wan-21") || compatClass.StartsWith("wan-22"))
-        {
-            int adjustedFrames = (int)(transitionFrames * 1.5);
-            adjustedFrames = GetValidTransitionFrames(adjustedFrames, model);
-            Logs.Info($"[VideoConcat] Adjusted color reference frames from {transitionFrames} to {adjustedFrames} for Wan model");
-            return adjustedFrames;
-        }
-
-        return transitionFrames;
     }
 }
