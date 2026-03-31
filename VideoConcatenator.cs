@@ -211,7 +211,7 @@ public class VideoConcatenator
             }
         }
 
-        JArray concatenatedVideo = ConcatenateVideoChunks(videoChunks);
+        JArray concatenatedVideo = ConcatenateVideoChunks(videoChunks, out int totalFrames);
 
         if (_enableTemporalBlend)
         {
@@ -219,6 +219,7 @@ public class VideoConcatenator
         }
         
         WGNodeData result = previousVideo.WithPath(concatenatedVideo);
+        result.Frames = totalFrames;
         result.FPS = videoFps;
         
         if (audioChunks.Count > 0)
@@ -364,16 +365,20 @@ public class VideoConcatenator
         return [colorMatchNode, 0];
     }
 
-    private JArray ConcatenateVideoChunks(List<WGNodeData> chunks)
+    private JArray ConcatenateVideoChunks(List<WGNodeData> chunks, out int totalFrames)
     {
+        totalFrames = 0;
         if (chunks.Count == 0)
             return null;
         
         if (chunks.Count == 1)
+        {
+            totalFrames = chunks[0].Frames ?? 0;
             return chunks[0].Path;
+        }
 
         JArray currentVideo = chunks[0].Path;
-        int currentFrames = chunks[0].Frames ?? 0;
+        totalFrames = chunks[0].Frames ?? 0;
 
         for (int i = 1; i < chunks.Count; i++)
         {
@@ -393,11 +398,11 @@ public class VideoConcatenator
             
             if (_frameMode == "include_overlap")
             {
-                currentFrames = currentFrames + nextFrames;
+                totalFrames = totalFrames + nextFrames;
             }
             else
             {
-                currentFrames = currentFrames + nextFrames - _transitionFrames;
+                totalFrames = totalFrames + nextFrames - _transitionFrames;
             }
         }
 
@@ -443,7 +448,7 @@ public class VideoConcatenator
         JArray result = chunks[0];
         int? videoFps = _generator.UserInput.TryGet(T2IParamTypes.VideoFPS, out int fpsRaw) ? fpsRaw : null;
         int fps = videoFps ?? 24;
-        int audioCrossfadeSamples = _audioCrossfadeFrames * (44100 / fps);
+        int audioCrossfadeSamples = (int)Math.Round(_audioCrossfadeFrames * (44100.0 / fps));
         for (int i = 1; i < chunks.Count; i++)
         {
             string crossfadeNode = _generator.CreateNode("AudioCrossFade", new JObject()

@@ -278,14 +278,24 @@ class VideoCrossFadeTransition:
                     video_a[non_trans_frames_a + i] * (1 - t) + video_b[i] * t
                 )
             elif blend_mode == "fade_to_black":
-                result[non_trans_frames_a + i] = video_a[non_trans_frames_a + i] * (
-                    1 - t
-                )
+                # First half: fade out video_a to black, second half: fade in video_b from black
+                if t < 0.5:
+                    result[non_trans_frames_a + i] = video_a[non_trans_frames_a + i] * (
+                        1 - t * 2
+                    )
+                else:
+                    result[non_trans_frames_a + i] = video_b[i] * ((t - 0.5) * 2)
             elif blend_mode == "fade_to_white":
-                result[non_trans_frames_a + i] = (
-                    video_a[non_trans_frames_a + i] * (1 - t)
-                    + torch.ones_like(video_a[non_trans_frames_a + i]) * t
-                )
+                # First half: fade out video_a to white, second half: fade in video_b from white
+                white = torch.ones_like(video_a[non_trans_frames_a + i])
+                if t < 0.5:
+                    result[non_trans_frames_a + i] = video_a[non_trans_frames_a + i] * (
+                        1 - t * 2
+                    ) + white * (t * 2)
+                else:
+                    result[non_trans_frames_a + i] = white * (
+                        1 - (t - 0.5) * 2
+                    ) + video_b[i] * ((t - 0.5) * 2)
             elif blend_mode == "dissolve":
                 # Dissolve uses random pixel selection weighted by t
                 mask = torch.rand((h, w, c)) < t
