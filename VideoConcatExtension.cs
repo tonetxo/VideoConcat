@@ -288,20 +288,20 @@ public class VideoConcatExtension : Extension
             }
 
             string durationsRaw = g.UserInput.Get(VideoConcatSectionDurations, "") ?? "";
+            // If no durations specified, don't set them - let VideoConcatenator read from the actual video
             int[] durations = ParseDurations(durationsRaw);
-            
+
             int totalSections = sectionPrompts.Length + 1;
-            
+
             if (durations.Length == 0)
             {
-                int defaultFrames = g.UserInput.Get(T2IParamTypes.VideoFrames, 25, sectionId: T2IParamInput.SectionID_Video);
-                durations = Enumerable.Repeat(defaultFrames, totalSections).ToArray();
+                // Don't fill in defaults here - let VideoConcatenator use the actual generated video's frame count
+                durations = [];
             }
             else if (durations.Length < totalSections)
             {
-                int defaultFrames = g.UserInput.Get(T2IParamTypes.VideoFrames, 25, sectionId: T2IParamInput.SectionID_Video);
-                int missing = totalSections - durations.Length;
-                durations = durations.Concat(Enumerable.Repeat(defaultFrames, missing)).ToArray();
+                // Partial durations provided - still let VideoConcatenator fill the rest from actual video
+                // We'll pass what we have and let it handle the rest
             }
 
             int transitionFrames = g.UserInput.Get(VideoConcatTransitionFrames, 12);

@@ -160,9 +160,14 @@ public class VideoConcatenator
             baseFps = _generator.UserInput.TryGet(T2IParamTypes.VideoFPS, out int i2vFps) ? i2vFps : null;
         }
         
-        double? baseCfg = _generator.UserInput.GetNullable(T2IParamTypes.CFGScale, T2IParamInput.SectionID_Video, false) 
-            ?? _generator.UserInput.GetNullable(T2IParamTypes.VideoCFG, T2IParamInput.SectionID_Video)
-            ?? _generator.UserInput.GetNullable(T2IParamTypes.CFGScale, T2IParamInput.SectionID_BaseOnly, false);
+        // Read CFG: the user sets it globally as CFGScale, and it applies to video generation.
+        // Try VideoCFG first (explicit override), then fall back to global CFGScale.
+        double? baseCfg = _generator.UserInput.GetNullable(T2IParamTypes.VideoCFG, T2IParamInput.SectionID_Video);
+        if (baseCfg == null)
+        {
+            // Get the effective CFGScale value (includes global/base inheritance)
+            baseCfg = _generator.UserInput.GetNullable(T2IParamTypes.CFGScale);
+        }
         
         // Get steps: for Text2Video use base Steps, for Image2Video use VideoSteps
         int baseSteps;
@@ -221,12 +226,16 @@ public class VideoConcatenator
         
         int? videoFps = baseFps ?? currentMedia.FPS;
 
+        // Use the actual frame count of the first video as the default for continuations
+        // This ensures all sections match the duration of video 1 even if the parameter differs
+        int firstVideoFrames = currentMedia.Frames ?? baseFrames ?? 25;
+        Logs.Info($"[VideoConcat] First video has {firstVideoFrames} frames (param default: {baseFrames}), using as default for sections");
         Logs.Info($"[VideoConcat] Starting continuation loop, _sections.Count={_sections.Count}, _sectionPrompts.Length={_sectionPrompts.Length}");
         
         for (int i = 1; i < _sections.Count; i++)
         {
             JObject section = _sections[i] as JObject;
-            int frames = section["duration_frames"]?.Value<int>() ?? baseFrames ?? 25;
+            int frames = section["duration_frames"]?.Value<int>() ?? firstVideoFrames;
             int promptIndex = i - 1;
             string prompt = promptIndex < _sectionPrompts.Length && !string.IsNullOrEmpty(_sectionPrompts[promptIndex]) 
                 ? _sectionPrompts[promptIndex] 
