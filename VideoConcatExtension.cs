@@ -23,6 +23,7 @@ public class VideoConcatExtension : Extension
     public static T2IRegisteredParam<double> VideoConcatTemporalStrength;
     public static T2IRegisteredParam<bool> VideoConcatEnableAudioFade;
     public static T2IRegisteredParam<int> VideoConcatAudioCrossfadeFrames;
+    public static T2IRegisteredParam<T2IModel> VideoConcatExtensionModel;
 
     public override void OnPreInit()
     {
@@ -221,6 +222,22 @@ public class VideoConcatExtension : Extension
             DoNotPreview: true,
             DependNonDefault: VideoConcatEnableAudioFade.Type.ID
         ));
+
+        VideoConcatExtensionModel = T2IParamTypes.Register<T2IModel>(new T2IParamType(
+            Name: "Extension Model",
+            Description: "Video model used to continue video sections beyond the first.\n" +
+                         "REQUIRED when using Text2Video models (Mochi, pure Text2Video) as main model.\n" +
+                         "Should be an Image2Video capable model (Wan I2V, SVD, LTXV, Hunyuan I2V, Cosmos).\n" +
+                         "Can be the same model as your main model if it supports Image2Video.",
+            Default: "",
+            Group: VideoConcatGroup,
+            OrderPriority: priority++,
+            FeatureFlag: "video",
+            DoNotPreview: true,
+            GetValues: s => T2IParamTypes.CleanModelList(Program.MainSDModels.ListModelsFor(s)
+                .Where(m => m.ModelClass is not null)
+                .Select(m => m.Name))
+        ));
     }
 
     private static void RegisterWorkflowStep()
@@ -240,9 +257,34 @@ public class VideoConcatExtension : Extension
                 throw new SwarmUserErrorException("Video concatenation requires video feature support");
             }
 
-            if (!g.UserInput.TryGet(T2IParamTypes.VideoModel, out T2IModel videoModel) || videoModel == null)
+            // Check for Text2Video mode (main model is video, no VideoModel selected)
+            T2IModel mainModel = g.UserInput.Get(T2IParamTypes.Model, null);
+            T2IModel videoModel = g.UserInput.Get(T2IParamTypes.VideoModel, null);
+            T2IModel extensionModel = g.UserInput.Get(VideoConcatExtensionModel, null);
+            
+            bool isText2Video = videoModel == null 
+                && mainModel != null 
+                && mainModel.ModelClass?.CompatClass?.IsText2Video == true;
+            
+            // Determine the model to use for continuations
+            T2IModel continuationModel = extensionModel ?? videoModel;
+            
+            if (continuationModel == null)
             {
-                throw new SwarmUserErrorException("Video concatenation requires a Video Model selected in 'Image To Video'");
+                if (isText2Video)
+                {
+                    throw new SwarmUserErrorException(
+                        "Video Concatenation with Text2Video requires an 'Extension Model' " +
+                        "in the Video Concatenation group. Please select a video model there."
+                    );
+                }
+                else
+                {
+                    throw new SwarmUserErrorException(
+                        "Video concatenation requires a Video Model selected in 'Image To Video', " +
+                        "or an 'Extension Model' in the Video Concatenation group."
+                    );
+                }
             }
 
             string durationsRaw = g.UserInput.Get(VideoConcatSectionDurations, "") ?? "";

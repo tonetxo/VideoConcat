@@ -81,39 +81,111 @@ public class VideoConcatenator
             return;
         }
 
+        // Detect if we have a Text2Video model as the main model
+        // Text2Video: Model is set and is Text2Video, VideoModel is null
+        // Image2Video: VideoModel is set, Model can be anything
         T2IModel videoModel = _generator.UserInput.Get(T2IParamTypes.VideoModel, null);
-        if (videoModel == null)
+        T2IModel mainModel = _generator.UserInput.Get(T2IParamTypes.Model, null);
+        bool isText2Video = videoModel == null 
+            && mainModel != null 
+            && mainModel.ModelClass?.CompatClass?.IsText2Video == true;
+        
+        T2IModel extensionModel = _generator.UserInput.Get(VideoConcatExtension.VideoConcatExtensionModel, null);
+        
+        Logs.Info($"[VideoConcat] isText2Video={isText2Video}, mainModel={mainModel?.Name ?? "null"}, videoModel={videoModel?.Name ?? "null"}, extensionModel={extensionModel?.Name ?? "null"}");
+        
+        // For continuations, use Extension Model first, then VideoModel
+        T2IModel continuationModel = extensionModel ?? videoModel;
+        
+        if (continuationModel == null)
         {
-            throw new SwarmUserErrorException("Video concatenation requires a Video Model selected in 'Image To Video'");
+            if (isText2Video)
+            {
+                throw new SwarmUserErrorException(
+                    "Video Concatenation with Text2Video models requires an 'Extension Model' " +
+                    "(any video model that supports Image2Video: LTXV, Wan I2V, SVD, Hunyuan I2V, Cosmos I2V, etc.).\n" +
+                    "Please select an Extension Model in the Video Concatenation group."
+                );
+            }
+            else
+            {
+                throw new SwarmUserErrorException(
+                    "Video concatenation requires a Video Model selected in 'Image To Video', " +
+                    "or an 'Extension Model' in the Video Concatenation group."
+                );
+            }
+        }
+        
+        if (isText2Video)
+        {
+            Logs.Info($"[VideoConcat] Text2Video mode (main={mainModel.Name}): using Extension Model '{continuationModel.Name}' for continuations");
+        }
+        else if (extensionModel != null)
+        {
+            Logs.Info($"[VideoConcat] Image2Video mode: using Extension Model '{extensionModel.Name}' for continuations");
+        }
+        else
+        {
+            Logs.Info($"[VideoConcat] Image2Video mode: using Video Model '{videoModel.Name}' for all sections");
         }
 
-        _transitionFrames = GetValidTransitionFrames(_transitionFrames, videoModel);
+        _transitionFrames = GetValidTransitionFrames(_transitionFrames, continuationModel);
 
         WGNodeData currentMedia = _generator.CurrentMedia;
+        Logs.Info($"[VideoConcat] CurrentMedia: DataType={currentMedia.DataType}, Frames={currentMedia.Frames}, Width={currentMedia.Width}, Height={currentMedia.Height}, Path={currentMedia.Path?[0] ?? "null"}");
+        
         if (currentMedia.Frames == null || currentMedia.Frames < 1)
         {
-            Logs.Warning("[VideoConcat] CurrentMedia has no video frames - VideoConcat should run after Image To Video step");
+            Logs.Warning("[VideoConcat] CurrentMedia has no video frames - VideoConcat should run after video generation");
             return;
         }
 
         WGNodeData originalAudioVae = _generator.CurrentAudioVae;
         WGNodeData originalVae = _generator.CurrentVae;
 
-        int? baseFrames = _generator.UserInput.TryGet(T2IParamTypes.VideoFrames, out int framesRaw) ? framesRaw : null;
-        int? baseFps = _generator.UserInput.TryGet(T2IParamTypes.VideoFPS, out int fpsRaw) ? fpsRaw : null;
+        // Get frames from appropriate parameter based on mode
+        int? baseFrames = null;
+        int? baseFps = null;
+        
+        if (isText2Video)
+        {
+            // Text2Video uses Text2VideoFrames
+            baseFrames = _generator.UserInput.TryGet(T2IParamTypes.Text2VideoFrames, out int t2vFrames) ? t2vFrames : null;
+            baseFps = _generator.UserInput.TryGet(T2IParamTypes.VideoFPS, out int t2vFps) ? t2vFps : null;
+        }
+        else
+        {
+            // Image2Video uses VideoFrames
+            baseFrames = _generator.UserInput.TryGet(T2IParamTypes.VideoFrames, out int i2vFrames) ? i2vFrames : null;
+            baseFps = _generator.UserInput.TryGet(T2IParamTypes.VideoFPS, out int i2vFps) ? i2vFps : null;
+        }
+        
         double? baseCfg = _generator.UserInput.GetNullable(T2IParamTypes.CFGScale, T2IParamInput.SectionID_Video, false) 
-            ?? _generator.UserInput.GetNullable(T2IParamTypes.VideoCFG, T2IParamInput.SectionID_Video);
-        int baseSteps = _generator.UserInput.GetNullable(T2IParamTypes.Steps, T2IParamInput.SectionID_Video, false) 
-            ?? _generator.UserInput.Get(T2IParamTypes.VideoSteps, 20, sectionId: T2IParamInput.SectionID_Video);
+            ?? _generator.UserInput.GetNullable(T2IParamTypes.VideoCFG, T2IParamInput.SectionID_Video)
+            ?? _generator.UserInput.GetNullable(T2IParamTypes.CFGScale, T2IParamInput.SectionID_BaseOnly, false);
+        
+        // Get steps: for Text2Video use base Steps, for Image2Video use VideoSteps
+        int baseSteps;
+        if (isText2Video)
+        {
+            baseSteps = _generator.UserInput.Get(T2IParamTypes.Steps, 20);
+        }
+        else
+        {
+            baseSteps = _generator.UserInput.GetNullable(T2IParamTypes.Steps, T2IParamInput.SectionID_Video, false) 
+                ?? _generator.UserInput.Get(T2IParamTypes.VideoSteps, 20, sectionId: T2IParamInput.SectionID_Video);
+        }
         string negPrompt = _generator.UserInput.Get(T2IParamTypes.NegativePrompt, "");
         long baseSeed = _generator.UserInput.Get(T2IParamTypes.Seed);
         string resFormat = _generator.UserInput.Get(T2IParamTypes.VideoResolution, "Model Preferred");
 
-        int width = videoModel.StandardWidth <= 0 ? 1024 : videoModel.StandardWidth;
-        int height = videoModel.StandardHeight <= 0 ? 576 : videoModel.StandardHeight;
+        Logs.Info($"[VideoConcat] baseSteps={baseSteps}, baseCfg={baseCfg}, baseFrames={baseFrames}, baseFps={baseFps}, isText2Video={isText2Video}");
+
+        int width = continuationModel.StandardWidth <= 0 ? 1024 : continuationModel.StandardWidth;
+        int height = continuationModel.StandardHeight <= 0 ? 576 : continuationModel.StandardHeight;
         int imageWidth = _generator.UserInput.GetImageWidth();
         int imageHeight = _generator.UserInput.GetImageHeight();
-        int resPrecision = videoModel.ModelClass?.CompatClass?.ID == "hunyuan-video" ? 16 : 64;
+        int resPrecision = continuationModel.ModelClass?.CompatClass?.ID == "hunyuan-video" ? 16 : 64;
 
         if (resFormat == "Image Aspect, Model Res")
         {
@@ -149,6 +221,8 @@ public class VideoConcatenator
         
         int? videoFps = baseFps ?? currentMedia.FPS;
 
+        Logs.Info($"[VideoConcat] Starting continuation loop, _sections.Count={_sections.Count}, _sectionPrompts.Length={_sectionPrompts.Length}");
+        
         for (int i = 1; i < _sections.Count; i++)
         {
             JObject section = _sections[i] as JObject;
@@ -161,11 +235,15 @@ public class VideoConcatenator
             double? sectionCfg = baseCfg;
             int sectionSteps = baseSteps;
 
+            Logs.Info($"[VideoConcat] Section {i}: frames={frames}, prompt='{prompt.Substring(0, Math.Min(50, prompt.Length))}...', steps={sectionSteps}, seed={sectionSeed}");
+
             WGNodeData newVideo = GenerateContinuationSection(
-                videoModel, previousVideo, frames, videoFps ?? 24, sectionSteps, sectionCfg,
+                continuationModel, previousVideo, frames, videoFps ?? 24, sectionSteps, sectionCfg,
                 width, height, widthArr, heightArr, prompt, negPrompt, sectionSeed, i
             );
 
+            Logs.Info($"[VideoConcat] Section {i} generated: Frames={newVideo.Frames}, DataType={newVideo.DataType}");
+            
             videoChunks.Add(newVideo);
             
             if (newVideo.AttachedAudio != null && audioVae != null)
@@ -186,7 +264,7 @@ public class VideoConcatenator
 
         if (_enableColorMatch && videoChunks.Count > 1)
         {
-            string compatClass = videoModel?.ModelClass?.CompatClass?.ID ?? "";
+            string compatClass = continuationModel?.ModelClass?.CompatClass?.ID ?? "";
             bool isWan = compatClass.StartsWith("wan-21") || compatClass.StartsWith("wan-22");
             
             double strength = _colorStrength;
@@ -195,7 +273,7 @@ public class VideoConcatenator
             if (isWan)
             {
                 strength = Math.Min(1.0, _colorStrength * 1.4);
-                refFrameCount = GetValidTransitionFrames((int)(_transitionFrames * 1.5), videoModel);
+                refFrameCount = GetValidTransitionFrames((int)(_transitionFrames * 1.5), continuationModel);
                 Logs.Info($"[VideoConcat] Wan color match: strength {_colorStrength:F2}->{strength:F2}, refFrames {_transitionFrames}->{refFrameCount}");
             }
             
@@ -255,6 +333,7 @@ public class VideoConcatenator
         long seed,
         int sectionIndex)
     {
+        // Extract the last N frames of the previous video as input for continuation
         string frameCountNode = _generator.CreateNode("SwarmCountFrames", new JObject()
         {
             ["image"] = previousVideo.Path
@@ -280,8 +359,11 @@ public class VideoConcatenator
         double swapPercent = _generator.UserInput.Get(T2IParamTypes.VideoSwapPercent, 0.5);
 
         WGNodeData inputForSection = previousVideo.WithPath(partialBatch);
+
+        // Set CurrentMedia to the partial batch (last N frames of previous video)
+        // This is the input for the continuation - the model will use these frames as reference
         _generator.CurrentMedia = inputForSection;
-        
+
         WorkflowGenerator.ImageToVideoGenInfo genInfo = new()
         {
             Generator = _generator,
@@ -303,13 +385,17 @@ public class VideoConcatenator
         };
 
         _generator.CreateImageToVideo(genInfo);
-        
-        WGNodeData rawResult = _generator.CurrentMedia.AsRawImage(genInfo.Vae);
-        
-        rawResult.Frames = frames;
-        rawResult.FPS = fps;
-        
-        return rawResult;
+
+        // CreateImageToVideo sets CurrentMedia to the generated video result
+        WGNodeData result = _generator.CurrentMedia;
+
+        // Ensure we have the correct frame count metadata
+        result.Frames = frames;
+        result.FPS = fps;
+
+        Logs.Info($"[VideoConcat] Section {sectionIndex}: requested {frames} frames, result type={result.DataType}");
+
+        return result;
     }
 
     private JArray GetWidthNode()

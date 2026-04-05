@@ -256,60 +256,81 @@ class VideoCrossFadeTransition:
 
         # Calculate output frames based on mode
         if include_overlap:
-            # Include overlap: frames_a + trans (overlap) + (frames_b - trans)
+            # Include all frames from both videos: video_a plays fully, then video_b plays fully
+            # The transition blend happens at the boundary without removing frames
             output_frames = frames_a + frames_b
         else:
-            # Exclude overlap: frames_a + frames_b - trans (overlap removed)
+            # Exclude overlap: the last 'trans' frames of A blend with first 'trans' frames of B
+            # Output: (frames_a - trans) + trans (blend zone) + (frames_b - trans)
+            # = frames_a + frames_b - trans
             output_frames = frames_a + frames_b - trans
 
         # Create output tensor
         result = torch.zeros((output_frames, h, w, c), dtype=video_a.dtype)
 
-        # Copy video_a up to transition start
-        non_trans_frames_a = frames_a - trans
-        result[:non_trans_frames_a] = video_a[:non_trans_frames_a]
-
-        # Create transition
-        for i in range(trans):
-            t = i / trans  # 0 to 1
-
-            if blend_mode == "crossfade":
-                result[non_trans_frames_a + i] = (
-                    video_a[non_trans_frames_a + i] * (1 - t) + video_b[i] * t
-                )
-            elif blend_mode == "fade_to_black":
-                # First half: fade out video_a to black, second half: fade in video_b from black
-                if t < 0.5:
-                    result[non_trans_frames_a + i] = video_a[non_trans_frames_a + i] * (
-                        1 - t * 2
-                    )
-                else:
-                    result[non_trans_frames_a + i] = video_b[i] * ((t - 0.5) * 2)
-            elif blend_mode == "fade_to_white":
-                # First half: fade out video_a to white, second half: fade in video_b from white
-                white = torch.ones_like(video_a[non_trans_frames_a + i])
-                if t < 0.5:
-                    result[non_trans_frames_a + i] = video_a[non_trans_frames_a + i] * (
-                        1 - t * 2
-                    ) + white * (t * 2)
-                else:
-                    result[non_trans_frames_a + i] = white * (
-                        1 - (t - 0.5) * 2
-                    ) + video_b[i] * ((t - 0.5) * 2)
-            elif blend_mode == "dissolve":
-                # Dissolve uses random pixel selection weighted by t
-                mask = torch.rand((h, w, c)) < t
-                result[non_trans_frames_a + i] = torch.where(
-                    mask, video_b[i], video_a[non_trans_frames_a + i]
-                )
-
-        # Copy video_b after transition
         if include_overlap:
-            # Include overlaps frames from video_b starting from 0
+            # Mode: include_overlap - play video_a fully, then video_b fully
+            # The transition blend is applied at the boundary
+            result[:frames_a] = video_a
             result[frames_a:] = video_b
+
+            # Apply crossfade blend at the boundary: last 'trans' of A with first 'trans' of B
+            for i in range(trans):
+                t = i / trans  # 0 to 1
+                idx_a = frames_a - trans + i  # Frame in video_a near end
+                idx_out = frames_a - trans + i  # Position in output (within video_a region)
+
+                if blend_mode == "crossfade":
+                    result[idx_out] = video_a[idx_a] * (1 - t) + video_b[i] * t
+                elif blend_mode == "fade_to_black":
+                    if t < 0.5:
+                        result[idx_out] = video_a[idx_a] * (1 - t * 2)
+                elif blend_mode == "fade_to_white":
+                    white = torch.ones_like(video_a[idx_a])
+                    if t < 0.5:
+                        result[idx_out] = video_a[idx_a] * (1 - t * 2) + white * (t * 2)
+                elif blend_mode == "dissolve":
+                    mask = torch.rand((h, w, c)) < t
+                    result[idx_out] = torch.where(mask, video_b[i], video_a[idx_a])
         else:
-            # Exclude overlap: start from trans frames into video_b
-            result[frames_a:] = video_b[trans:]
+            # Mode: exclude_overlap - blend zone replaces overlap frames
+            # Copy video_a up to transition start
+            non_trans_frames_a = frames_a - trans
+            result[:non_trans_frames_a] = video_a[:non_trans_frames_a]
+
+            # Create transition blend zone
+            for i in range(trans):
+                t = i / trans  # 0 to 1
+
+                if blend_mode == "crossfade":
+                    result[non_trans_frames_a + i] = (
+                        video_a[non_trans_frames_a + i] * (1 - t) + video_b[i] * t
+                    )
+                elif blend_mode == "fade_to_black":
+                    if t < 0.5:
+                        result[non_trans_frames_a + i] = video_a[non_trans_frames_a + i] * (
+                            1 - t * 2
+                        )
+                    else:
+                        result[non_trans_frames_a + i] = video_b[i] * ((t - 0.5) * 2)
+                elif blend_mode == "fade_to_white":
+                    white = torch.ones_like(video_a[non_trans_frames_a + i])
+                    if t < 0.5:
+                        result[non_trans_frames_a + i] = video_a[non_trans_frames_a + i] * (
+                            1 - t * 2
+                        ) + white * (t * 2)
+                    else:
+                        result[non_trans_frames_a + i] = white * (
+                            1 - (t - 0.5) * 2
+                        ) + video_b[i] * ((t - 0.5) * 2)
+                elif blend_mode == "dissolve":
+                    mask = torch.rand((h, w, c)) < t
+                    result[non_trans_frames_a + i] = torch.where(
+                        mask, video_b[i], video_a[non_trans_frames_a + i]
+                    )
+
+            # Copy video_b after transition (skip the first 'trans' frames that were blended)
+            result[non_trans_frames_a + trans:] = video_b[trans:]
 
         return (result,)
 

@@ -11,12 +11,25 @@ Extensión para SwarmUI que permite concatenar múltiples secciones de video con
 - La extensión aparece en la UI como grupo "Video Concatenation" con toggle
 - Se habilita cuando "Section Prompts" tiene contenido separado por `|||`
 - La extensión debe:
-  1. Correr DESPUÉS del paso Image To Video (prioridad 11.5)
-  2. Tomar el primer video de Image To Video como input
-  3. Generar videos de continuación para cada prompt
+  1. Correr DESPUÉS del paso de generación de video (prioridad 11.5)
+  2. Tomar el primer video (de Text2Video o Image To Video) como input
+  3. Generar videos de continuación para cada prompt usando un modelo Image2Video
   4. Aplicar crossfade transitions entre videos
   5. Aplicar color matching y temporal blending
   6. Concatenar audio con crossfade
+
+## Modos de Operación
+
+### Image2Video (comportamiento original)
+- Seleccionar modelo en "Video Model" (Image2Video)
+- El primer video se genera con Image To Video
+- Las continuaciones usan el mismo modelo
+
+### Text2Video (nuevo)
+- Seleccionar modelo Text2Video como modelo principal (Mochi, LTXV, HunyuanVideo, Wan, Cosmos)
+- El primer video se genera directamente desde texto
+- **Requiere** seleccionar un modelo Image2Video en "Extension Model"
+- Las continuaciones usan el Extension Model
 
 ## Flujo de Prompts
 
@@ -67,6 +80,7 @@ src/Extensions/VideoConcat/
 | `Temporal Blend Strength` | double | 0.5 | Intensidad del blending (0-1) |
 | `Enable Audio Fade` | bool | true | Crossfade de audio en transiciones |
 | `Audio Crossfade Frames` | int | 8 | Frames de video (convertidos a samples automáticamente) |
+| `Extension Model` | T2IModel | "" | Modelo Image2Video para continuar secciones (requerido para Text2Video) |
 
 ## Flujo de Transiciones
 
@@ -134,6 +148,7 @@ Resultado (include_overlap): 121 + 121 = 242 frames (con overlap)
 3. `8479f05` - Remove redundant Toggleable
 4. `3141983` - Fix toggle and prompt logic
 5. `ec46789` - Major improvements: crossfade transitions, configurable modes, audio fade
+6. **Pendiente** - Add Text2Video support with Extension Model parameter
 
 ## Auto-ajustes por Modelo
 
