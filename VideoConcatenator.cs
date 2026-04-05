@@ -393,10 +393,71 @@ public class VideoConcatenator
             ContextID = T2IParamInput.SectionID_Video
         };
 
-        _generator.CreateImageToVideo(genInfo);
+        // For LTXV models, use LTXVTiledVAEDecode instead of standard VAEDecode/VAEDecodeTiled
+        string compatClass = videoModel?.ModelClass?.CompatClass?.ID ?? "";
+        bool isLTXV = compatClass.Contains("ltx-video");
 
-        // CreateImageToVideo sets CurrentMedia to the generated video result
+        try
+        {
+            _generator.CreateImageToVideo(genInfo);
+        }
+        finally
+        {
+            // Ensure any temp handlers are removed
+        }
+
         WGNodeData result = _generator.CurrentMedia;
+
+        // For LTXV: replace the standard VAE decode node with LTXVTiledVAEDecode.
+        // CreateImageToVideo already decoded to DT_VIDEO, so we find the latent that
+        // was fed to the decode node and create our own decoder from it.
+        Logs.Info($"[VideoConcat] LTXV check: compatClass={compatClass}, isLTXV={isLTXV}, result.DataType={result.DataType}, genInfo.Vae.Path={genInfo.Vae?.Path?.ToString() ?? "null"}");
+
+        if (isLTXV && result.DataType == WGNodeData.DT_VIDEO && genInfo.Vae != null)
+        {
+            string decodeNodeId = result.Path[0]?.ToString();
+            Logs.Info($"[VideoConcat] Attempting VAE decode replacement: decodeNodeId={decodeNodeId}");
+
+            if (!string.IsNullOrEmpty(decodeNodeId))
+            {
+                JObject decodeNode = _generator.Workflow[decodeNodeId] as JObject;
+                Logs.Info($"[VideoConcat] decodeNode found: {decodeNode != null}");
+
+                if (decodeNode != null)
+                {
+                    JToken samplesInput = decodeNode["inputs"]?["samples"] ?? decodeNode["inputs"]?["latent"];
+                    Logs.Info($"[VideoConcat] samplesInput found: {samplesInput != null}, type={decodeNode["inputs"]?.ToString()}");
+
+                    if (samplesInput != null)
+                    {
+                        string decodeNodeId2 = _generator.CreateNode("LTXVTiledVAEDecode", new JObject()
+                        {
+                            ["vae"] = genInfo.Vae.Path,
+                            ["latents"] = samplesInput,
+                            ["horizontal_tiles"] = 1,
+                            ["vertical_tiles"] = 1,
+                            ["overlap"] = 1,
+                            ["last_frame_fix"] = false,
+                        });
+                        result = result.WithPath([decodeNodeId2, 0], WGNodeData.DT_VIDEO, result.Compat);
+                        _generator.CurrentMedia = result;
+                        Logs.Info($"[VideoConcat] Section {sectionIndex}: replaced VAE decode with LTXVTiledVAEDecode (nodeId={decodeNodeId2})");
+                    }
+                    else
+                    {
+                        Logs.Warning("[VideoConcat] Could not find samples/latents input in decode node");
+                    }
+                }
+                else
+                {
+                    Logs.Warning($"[VideoConcat] Decode node '{decodeNodeId}' not found in Workflow");
+                }
+            }
+            else
+            {
+                Logs.Warning("[VideoConcat] decodeNodeId is null or empty");
+            }
+        }
 
         // Ensure we have the correct frame count metadata
         result.Frames = frames;
