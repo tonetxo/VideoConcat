@@ -23,6 +23,7 @@ public class VideoConcatenator
     private bool _enableAudioCrossfade = true;
     private int _audioCrossfadeFrames = 8;
     private bool _enableRTXUpscale = false;
+    private bool _enableFastSave = true;
 
     public VideoConcatenator(WorkflowGenerator generator)
     {
@@ -78,6 +79,12 @@ public class VideoConcatenator
     public VideoConcatenator SetRTXUpscale(bool enabled)
     {
         _enableRTXUpscale = enabled;
+        return this;
+    }
+
+    public VideoConcatenator SetFastSave(bool enabled)
+    {
+        _enableFastSave = enabled;
         return this;
     }
 
@@ -345,9 +352,30 @@ public class VideoConcatenator
         _generator.CurrentMedia = result;
         
         string outputId = _generator.GetStableDynamicID(50000, 0);
-        _generator.CurrentMedia.SaveOutput(originalVae, originalAudioVae, outputId);
         
-        Logs.Info($"[VideoConcat] Generated {_sections.Count} sections, concatenated video saved with ID {outputId}");
+        // Use VideoFastSave with NVENC support if enabled and RTX upscaling is active (high resolution)
+        // VideoFastSave automatically falls back to optimized CPU encoding if NVENC unavailable
+        if (_enableFastSave)
+        {
+            string videoFormat = _generator.UserInput.Get(T2IParamTypes.VideoFormat, "h264-mp4");
+            string qualityPreset = "balanced";
+            
+            string fastSaveNode = _generator.CreateNode("VideoFastSave", new JObject()
+            {
+                ["images"] = result.Path,
+                ["fps"] = videoFps,
+                ["quality"] = qualityPreset,
+                ["format"] = videoFormat,
+                ["audio"] = result.AttachedAudio?.Path
+            }, outputId);
+            
+            Logs.Info($"[VideoConcat] Generated {_sections.Count} sections using VideoFastSave (NVENC-accelerated), output ID {outputId}");
+        }
+        else
+        {
+            _generator.CurrentMedia.SaveOutput(originalVae, originalAudioVae, outputId);
+            Logs.Info($"[VideoConcat] Generated {_sections.Count} sections, concatenated video saved with ID {outputId}");
+        }
     }
 
     private WGNodeData GenerateContinuationSection(

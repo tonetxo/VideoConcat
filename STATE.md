@@ -64,6 +64,8 @@ src/Extensions/VideoConcat/
 5. ✅ Temporal blending solo en zonas de transición
 6. ✅ Audio crossfade con overlap blending (no fade in/out)
 7. ✅ Modos configurables de transición
+8. ✅ RTX Video Super Resolution node integration (2x upscale)
+9. ✅ VideoFastSave node with NVENC GPU acceleration
 
 ## Parámetros
 
@@ -82,47 +84,7 @@ src/Extensions/VideoConcat/
 | `Audio Crossfade Frames` | int | 8 | Frames de video (convertidos a samples automáticamente) |
 | `Extension Model` | T2IModel | "" | Modelo Image2Video para continuar secciones (requerido para Text2Video) |
 | `Enable RTX Upscale` | bool | false | Aplicar upscaling 2x RTX VSR (computacionalmente costoso) |
-
-## Flujo de Transiciones
-
-### Crossfade (modo por defecto)
-```
-Video 1: [frame 0...120] (121 frames)
-Video 2: [frame 0...120] (121 frames)
-
-Crossfade Process:
-1. Video 1[0...108] se mantiene (109 frames sin cambios)
-2. Blend zone: Video 1[109...120] blend con Video 2[0...11] (12 frames)
-3. Video 2[12...120] se mantiene (109 frames sin cambios)
-
-Resultado (exclude_overlap): 109 + 12 + 109 = 230 frames
-Resultado (include_overlap): 121 + 121 = 242 frames (con overlap)
-```
-
-### Color Matching
-- Solo usa los últimos N frames del video anterior como referencia
-- Aplica histogram matching antes de concatenar
-- Más preciso que comparar videos completos
-
-### Temporal Blending
-- Solo aplica en zonas de transición (primeros y últimos N frames)
-- No afecta el contenido central del video
-- Reduce flickering sin causar efecto ghost
-
-### Audio Crossfade
-- Cada chunk mantiene su audio completo
-- Durante el overlap: `audio_a * (1-t) + audio_b * t`
-- Convierte frames de video a samples: `frames * (44100 / fps)`
-- Mismo comportamiento que crossfade de video
-
-## Nodos ComfyUI
-
-- `VideoColorMatch` - Matching de histograma de color
-- `VideoTemporalBlend` - Suavizado temporal en transiciones
-- `VideoCrossFadeTransition` - Transiciones crossfade con modos
-- `AudioCrossFade` - Crossfade de audio con overlap blending
-- `VideoBatch` - Batching de frames
-- `RTXVideoSuperResolution` - NVIDIA RTX Video Super Resolution (opcional, se aplica al final del workflow, 2x upscale calidad ULTRA)
+| `Enable Fast Save` | bool | true | Usar encoding GPU-accelerado (NVENC) para salida rápida |
 
 ## Flujo de Trabajo Actualizado
 
@@ -135,8 +97,11 @@ Resultado (include_overlap): 121 + 121 = 242 frames (con overlap)
    - Concatena todos con `VideoCrossFadeTransition`
    - Aplica temporal blending en transiciones
    - Concatena audio con `AudioCrossFade`
-   - **Aplica RTX Video Super Resolution** (2x upscale calidad ULTRA)
-   - Guarda el resultado final
+   - **Aplica RTX Video Super Resolution** (2x upscale calidad ULTRA, opcional)
+   - **Guarda con VideoFastSave** (NVENC GPU acceleration, fallback a CPU optimized)
+     - Use NVENC h264_nvenc/hevc_nvenc when available
+     - Fallback to libx264/libx265 with veryfast preset when NVENC unavailable
+     - Audio preserved properly with aac encoding
 
 ## Flujo de Trabajo
 
@@ -164,7 +129,8 @@ Resultado (include_overlap): 121 + 121 = 242 frames (con overlap)
 3. `8479f05` - Remove redundant Toggleable
 4. `3141983` - Fix toggle and prompt logic
 5. `ec46789` - Major improvements: crossfade transitions, configurable modes, audio fade
-6. **Pendiente** - Add RTX Video Super Resolution node at end of workflow
+6. `3272147` - feat: add optional RTX Video Super Resolution upscaling
+7. **Pending commit** - feat: add VideoFastSave with NVENC GPU acceleration
 
 ## Auto-ajustes por Modelo
 

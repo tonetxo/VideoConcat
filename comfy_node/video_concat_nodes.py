@@ -278,7 +278,9 @@ class VideoCrossFadeTransition:
             for i in range(trans):
                 t = i / trans  # 0 to 1
                 idx_a = frames_a - trans + i  # Frame in video_a near end
-                idx_out = frames_a - trans + i  # Position in output (within video_a region)
+                idx_out = (
+                    frames_a - trans + i
+                )  # Position in output (within video_a region)
 
                 if blend_mode == "crossfade":
                     result[idx_out] = video_a[idx_a] * (1 - t) + video_b[i] * t
@@ -308,17 +310,17 @@ class VideoCrossFadeTransition:
                     )
                 elif blend_mode == "fade_to_black":
                     if t < 0.5:
-                        result[non_trans_frames_a + i] = video_a[non_trans_frames_a + i] * (
-                            1 - t * 2
-                        )
+                        result[non_trans_frames_a + i] = video_a[
+                            non_trans_frames_a + i
+                        ] * (1 - t * 2)
                     else:
                         result[non_trans_frames_a + i] = video_b[i] * ((t - 0.5) * 2)
                 elif blend_mode == "fade_to_white":
                     white = torch.ones_like(video_a[non_trans_frames_a + i])
                     if t < 0.5:
-                        result[non_trans_frames_a + i] = video_a[non_trans_frames_a + i] * (
-                            1 - t * 2
-                        ) + white * (t * 2)
+                        result[non_trans_frames_a + i] = video_a[
+                            non_trans_frames_a + i
+                        ] * (1 - t * 2) + white * (t * 2)
                     else:
                         result[non_trans_frames_a + i] = white * (
                             1 - (t - 0.5) * 2
@@ -330,7 +332,7 @@ class VideoCrossFadeTransition:
                     )
 
             # Copy video_b after transition (skip the first 'trans' frames that were blended)
-            result[non_trans_frames_a + trans:] = video_b[trans:]
+            result[non_trans_frames_a + trans :] = video_b[trans:]
 
         return (result,)
 
@@ -535,6 +537,303 @@ class AudioCrossFade:
         return (result,)
 
 
+class VideoFastSave:
+    """
+    Fast video save node using GPU-accelerated encoding (NVENC) when available.
+    Falls back to CPU encoding with optimized settings if NVENC is not available.
+    """
+
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "images": ("IMAGE",),
+                "fps": (
+                    "FLOAT",
+                    {"default": 24.0, "min": 0.01, "max": 120.0, "step": 0.01},
+                ),
+                "quality": (["fast", "balanced", "quality"], {"default": "balanced"}),
+                "format": (["h264-mp4", "h265-mp4", "webm"], {"default": "h264-mp4"}),
+            },
+            "optional": {
+                "audio": ("AUDIO",),
+            },
+        }
+
+    RETURN_TYPES = ("IMAGE",)
+    OUTPUT_NODE = True
+    FUNCTION = "save_video"
+    CATEGORY = "SwarmUI/video"
+    DESCRIPTION = "Fast video save with GPU acceleration (NVENC) support."
+
+    def _check_nvenc_available(self):
+        """Check if NVENC (NVIDIA GPU encoding) is available."""
+        import subprocess
+
+        try:
+            result = subprocess.run(
+                ["ffmpeg", "-encoders"], capture_output=True, text=True, timeout=5
+            )
+            return "h264_nvenc" in result.stdout
+        except Exception:
+            return False
+
+    def save_video(self, images, fps, quality, format, audio=None):
+        import subprocess
+        import tempfile
+        import os
+        import wave
+        import struct
+        import io
+        import numpy as np
+        from PIL import Image
+        from server import PromptServer, BinaryEventTypes
+
+        if images.shape[0] == 0:
+            return (images,)
+
+        # For single image, return PNG
+        if images.shape[0] == 1:
+            return (images,)
+
+        # Quality presets
+        quality_settings = {
+            "fast": {
+                "nvenc_preset": "p1",
+                "nvenc_cq": "23",
+                "cpu_preset": "ultrafast",
+                "cpu_crf": "23",
+            },
+            "balanced": {
+                "nvenc_preset": "p4",
+                "nvenc_cq": "20",
+                "cpu_preset": "veryfast",
+                "cpu_crf": "20",
+            },
+            "quality": {
+                "nvenc_preset": "p7",
+                "nvenc_cq": "18",
+                "cpu_preset": "medium",
+                "cpu_crf": "18",
+            },
+        }
+        settings = quality_settings.get(quality, quality_settings["balanced"])
+
+        # Convert tensor to numpy
+        i = 255.0 * images.cpu().numpy()
+        raw_images = np.clip(i, 0, 255).astype(np.uint8)
+        h, w = raw_images.shape[1], raw_images.shape[2]
+
+        # Use NVENC if available, otherwise CPU encoding
+        use_nvenc = self._check_nvenc_available()
+
+        # Determine encoder and args
+        if format == "h264-mp4":
+            if use_nvenc:
+                video_args = [
+                    "-c:v",
+                    "h264_nvenc",
+                    "-preset",
+                    settings["nvenc_preset"],
+                    "-cq",
+                    settings["nvenc_cq"],
+                    "-pix_fmt",
+                    "yuv420p",
+                ]
+            else:
+                video_args = [
+                    "-c:v",
+                    "libx264",
+                    "-preset",
+                    settings["cpu_preset"],
+                    "-crf",
+                    settings["cpu_crf"],
+                    "-pix_fmt",
+                    "yuv420p",
+                ]
+            ext = "mp4"
+            type_num = 5
+            audio_args = ["-c:a", "aac", "-b:a", "192k"]
+        elif format == "h265-mp4":
+            if use_nvenc:
+                video_args = [
+                    "-c:v",
+                    "hevc_nvenc",
+                    "-preset",
+                    settings["nvenc_preset"],
+                    "-cq",
+                    settings["nvenc_cq"],
+                ]
+            else:
+                video_args = [
+                    "-c:v",
+                    "libx265",
+                    "-preset",
+                    settings["cpu_preset"],
+                    "-crf",
+                    settings["cpu_crf"],
+                ]
+            ext = "mp4"
+            type_num = 5
+            audio_args = ["-c:a", "aac", "-b:a", "192k"]
+        elif format == "webm":
+            video_args = [
+                "-c:v",
+                "libvpx-vp9",
+                "-crf",
+                "20",
+                "-b:v",
+                "0",
+                "-pix_fmt",
+                "yuv420p",
+            ]
+            ext = "webm"
+            type_num = 6
+            audio_args = ["-c:a", "libopus", "-b:a", "128k"]
+        else:
+            # Default to h264
+            if use_nvenc:
+                video_args = [
+                    "-c:v",
+                    "h264_nvenc",
+                    "-preset",
+                    settings["nvenc_preset"],
+                    "-cq",
+                    settings["nvenc_cq"],
+                    "-pix_fmt",
+                    "yuv420p",
+                ]
+            else:
+                video_args = [
+                    "-c:v",
+                    "libx264",
+                    "-preset",
+                    settings["cpu_preset"],
+                    "-crf",
+                    settings["cpu_crf"],
+                    "-pix_fmt",
+                    "yuv420p",
+                ]
+            ext = "mp4"
+            type_num = 5
+            audio_args = ["-c:a", "aac", "-b:a", "192k"]
+
+        # Prepare audio if present
+        audio_input = []
+        file_audio = None
+        if audio is not None and audio_args:
+            waveform = (
+                audio.get("waveform", audio) if isinstance(audio, dict) else audio
+            )
+            sample_rate = (
+                audio.get("sample_rate", 44100) if isinstance(audio, dict) else 44100
+            )
+
+            if waveform.dim() == 3:
+                waveform = waveform.squeeze(0)
+
+            num_audio_samples = waveform.shape[-1]
+            video_duration = len(raw_images) / fps
+            target_samples = int(video_duration * sample_rate)
+
+            audio_np = waveform.cpu().numpy()
+            if num_audio_samples > target_samples:
+                audio_np = audio_np[:, :target_samples]
+            elif num_audio_samples < target_samples:
+                channels = audio_np.shape[0]
+                padding = np.zeros(
+                    (channels, target_samples - num_audio_samples), dtype=audio_np.dtype
+                )
+                audio_np = np.concatenate([audio_np, padding], axis=1)
+
+            audio_int16 = (np.clip(audio_np.T, -1.0, 1.0) * 32767).astype(np.int16)
+
+            import tempfile
+
+            file_audio = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+            with wave.open(file_audio.name, "wb") as wav_file:
+                wav_file.setnchannels(audio_np.shape[0])
+                wav_file.setsampwidth(2)
+                wav_file.setframerate(sample_rate)
+                wav_file.writeframes(audio_int16.tobytes())
+            audio_input = ["-i", file_audio.name]
+
+        # Create temporary output file
+        import tempfile
+
+        file_out = tempfile.NamedTemporaryFile(suffix=f".{ext}", delete=False)
+
+        # Build ffmpeg command
+        ffmpeg_args = (
+            [
+                "ffmpeg",
+                "-v",
+                "error",
+                "-f",
+                "rawvideo",
+                "-pix_fmt",
+                "rgb24",
+                "-s",
+                f"{w}x{h}",
+                "-r",
+                str(fps),
+                "-i",
+                "-",
+            ]
+            + audio_input
+            + video_args
+            + audio_args
+            + [file_out.name]
+        )
+
+        try:
+            result = subprocess.run(
+                ffmpeg_args,
+                input=raw_images.tobytes(),
+                capture_output=True,
+                timeout=300,  # 5 minute timeout
+            )
+
+            if result.returncode != 0:
+                print(
+                    f"[VideoFastSave] ffmpeg failed: {result.stderr.decode('utf-8')}",
+                    file=sys.stderr,
+                )
+                return (images,)
+
+            # Read output and send to server
+            with open(file_out.name, "rb") as f:
+                out_data = f.read()
+
+            out = io.BytesIO()
+            header = struct.pack(">I", type_num)
+            out.write(header)
+            out.write(out_data)
+            out.seek(0)
+
+            server = PromptServer.instance
+            server.send_sync(
+                "progress", {"value": 12346, "max": 12346}, sid=server.client_id
+            )
+            server.send_sync(
+                BinaryEventTypes.PREVIEW_IMAGE, out.getvalue(), sid=server.client_id
+            )
+
+        finally:
+            # Cleanup
+            try:
+                os.unlink(file_out.name)
+            except Exception:
+                pass
+            if file_audio:
+                try:
+                    os.unlink(file_audio.name)
+                except Exception:
+                    pass
+
+        return (images,)
+
+
 # Node mappings for ComfyUI
 NODE_CLASS_MAPPINGS = {
     "VideoColorMatch": VideoColorMatch,
@@ -543,6 +842,7 @@ NODE_CLASS_MAPPINGS = {
     "VideoBatch": VideoBatch,
     "EmptyLatentVideo": EmptyLatentVideo,
     "AudioCrossFade": AudioCrossFade,
+    "VideoFastSave": VideoFastSave,
 }
 
 # Human-readable display names
@@ -553,4 +853,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "VideoBatch": "Video Batch (SwarmUI)",
     "EmptyLatentVideo": "Empty Latent Video (SwarmUI)",
     "AudioCrossFade": "Audio CrossFade (SwarmUI)",
+    "VideoFastSave": "Video Fast Save (SwarmUI)",
 }

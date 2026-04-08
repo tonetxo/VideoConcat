@@ -104,6 +104,7 @@ Toggle in the "Video Concatenation" parameter group to enable NVIDIA RTX Video S
 - **Disabled** (default): No upscaling, faster generation
 - **Warning**: RTX VSR is computationally expensive and will significantly increase generation time (frame-by-frame processing)
 - **Recommendation**: Use for final output only, not for previews
+- **Pair with Fast Save**: Highly recommended to enable "Enable Fast Save" when using RTX Upscale, as the output video will be 4x pixel resolution (2x width × 2x height)
 
 ### Parameters
 
@@ -114,6 +115,35 @@ Toggle in the "Video Concatenation" parameter group to enable NVIDIA RTX Video S
 ### Requirements
 
 The `comfyui_nvidia_rtx_nodes` custom node must be installed in ComfyUI. When enabled, the node is applied after temporal blending and before the final save.
+
+## Fast Video Save (NVENC Acceleration)
+
+**GPU-accelerated video encoding** using NVIDIA NVENC when available, with automatic fallback to optimized CPU encoding.
+
+### Enable Fast Save
+
+Toggle in the "Video Concatenation" parameter group. Default: **enabled**.
+
+- **Enabled**: Uses NVIDIA NVENC (h264_nvenc/hevc_nvenc) for fast GPU encoding when available
+- **Fallback**: Uses optimized CPU encoding (libx264/libx265 with veryfast preset) when NVENC not available
+- **Recommended**: Enable when using RTX Upscale (4x pixel increase) to avoid slow CPU encoding bottleneck
+
+### Quality Presets
+
+The node uses "balanced" preset by default:
+- **fast**: NVENC p1 preset, CPU ultrafast preset - fastest encoding
+- **balanced**: NVENC p4 preset, CPU veryfast preset - good quality/speed tradeoff
+- **quality**: NVENC p7 preset, CPU medium preset - best quality
+
+### Supported Formats
+
+- **h264-mp4**: H.264 video with AAC audio
+- **h265-mp4**: H.265/HEVC video with AAC audio
+- **webm**: VP9 video with Opus audio
+
+### Requirements
+
+No special requirements. NVENC is automatically detected via `ffmpeg -encoders`. If NVENC is not available (no NVIDIA GPU, driver issues, wrong ffmpeg build), it automatically falls back to CPU encoding.
 
 ## Architecture
 

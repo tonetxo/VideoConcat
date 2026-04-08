@@ -25,6 +25,7 @@ public class VideoConcatExtension : Extension
     public static T2IRegisteredParam<int> VideoConcatAudioCrossfadeFrames;
     public static T2IRegisteredParam<T2IModel> VideoConcatExtensionModel;
     public static T2IRegisteredParam<bool> VideoConcatEnableRTXUpscale;
+    public static T2IRegisteredParam<bool> VideoConcatEnableFastSave;
 
     public override void OnPreInit()
     {
@@ -252,6 +253,20 @@ public class VideoConcatExtension : Extension
             FeatureFlag: "video",
             DoNotPreview: true
         ));
+
+        VideoConcatEnableFastSave = T2IParamTypes.Register<bool>(new T2IParamType(
+            Name: "Enable Fast Save",
+            Description: "Use GPU-accelerated video encoding (NVENC) for faster output.\n" +
+                         "Automatically detects NVIDIA NVENC support and uses it when available.\n" +
+                         "Falls back to optimized CPU encoding if NVENC is not available.\n" +
+                         "Highly recommended when RTX Upscale is enabled (4x pixel increase).\n" +
+                         "Uses 'balanced' quality preset for good speed/quality tradeoff.",
+            Default: "true",
+            Group: VideoConcatGroup,
+            OrderPriority: priority++,
+            FeatureFlag: "video",
+            DoNotPreview: true
+        ));
     }
 
     private static void RegisterWorkflowStep()
@@ -328,6 +343,7 @@ public class VideoConcatExtension : Extension
             bool enableAudioCrossfade = g.UserInput.Get(VideoConcatEnableAudioFade, true);
             int audioCrossfadeFrames = g.UserInput.Get(VideoConcatAudioCrossfadeFrames, 8);
             bool enableRTXUpscale = g.UserInput.Get(VideoConcatEnableRTXUpscale, false);
+            bool enableFastSave = g.UserInput.Get(VideoConcatEnableFastSave, true);
 
             try
             {
@@ -346,6 +362,7 @@ public class VideoConcatExtension : Extension
                     .SetTemporalBlending(enableTemporalBlend, temporalStrength)
                     .SetAudioCrossfade(enableAudioCrossfade, audioCrossfadeFrames)
                     .SetRTXUpscale(enableRTXUpscale)
+                    .SetFastSave(enableFastSave)
                     .Concatenate();
             }
             catch (Exception ex)
