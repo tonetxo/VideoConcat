@@ -24,6 +24,7 @@ public class VideoConcatExtension : Extension
     public static T2IRegisteredParam<bool> VideoConcatEnableAudioFade;
     public static T2IRegisteredParam<int> VideoConcatAudioCrossfadeFrames;
     public static T2IRegisteredParam<T2IModel> VideoConcatExtensionModel;
+    public static T2IRegisteredParam<bool> VideoConcatEnableRTXUpscale;
 
     public override void OnPreInit()
     {
@@ -238,6 +239,19 @@ public class VideoConcatExtension : Extension
                 .Where(m => m.ModelClass is not null)
                 .Select(m => m.Name))
         ));
+
+        VideoConcatEnableRTXUpscale = T2IParamTypes.Register<bool>(new T2IParamType(
+            Name: "Enable RTX Upscale",
+            Description: "Apply NVIDIA RTX Video Super Resolution upscaling (2x) to the final video.\n" +
+                         "Uses NVIDIA RTX VSR with ULTRA quality settings.\n" +
+                         "WARNING: This is computationally expensive and will significantly increase generation time.\n" +
+                         "Recommended for final output only, not previews.",
+            Default: "false",
+            Group: VideoConcatGroup,
+            OrderPriority: priority++,
+            FeatureFlag: "video",
+            DoNotPreview: true
+        ));
     }
 
     private static void RegisterWorkflowStep()
@@ -313,6 +327,7 @@ public class VideoConcatExtension : Extension
             double temporalStrength = g.UserInput.Get(VideoConcatTemporalStrength, 0.5);
             bool enableAudioCrossfade = g.UserInput.Get(VideoConcatEnableAudioFade, true);
             int audioCrossfadeFrames = g.UserInput.Get(VideoConcatAudioCrossfadeFrames, 8);
+            bool enableRTXUpscale = g.UserInput.Get(VideoConcatEnableRTXUpscale, false);
 
             try
             {
@@ -330,6 +345,7 @@ public class VideoConcatExtension : Extension
                     .SetColorMatching(enableColorMatch, colorStrength)
                     .SetTemporalBlending(enableTemporalBlend, temporalStrength)
                     .SetAudioCrossfade(enableAudioCrossfade, audioCrossfadeFrames)
+                    .SetRTXUpscale(enableRTXUpscale)
                     .Concatenate();
             }
             catch (Exception ex)

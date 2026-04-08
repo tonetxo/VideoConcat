@@ -81,6 +81,7 @@ src/Extensions/VideoConcat/
 | `Enable Audio Fade` | bool | true | Crossfade de audio en transiciones |
 | `Audio Crossfade Frames` | int | 8 | Frames de video (convertidos a samples automáticamente) |
 | `Extension Model` | T2IModel | "" | Modelo Image2Video para continuar secciones (requerido para Text2Video) |
+| `Enable RTX Upscale` | bool | false | Aplicar upscaling 2x RTX VSR (computacionalmente costoso) |
 
 ## Flujo de Transiciones
 
@@ -121,6 +122,21 @@ Resultado (include_overlap): 121 + 121 = 242 frames (con overlap)
 - `VideoCrossFadeTransition` - Transiciones crossfade con modos
 - `AudioCrossFade` - Crossfade de audio con overlap blending
 - `VideoBatch` - Batching de frames
+- `RTXVideoSuperResolution` - NVIDIA RTX Video Super Resolution (opcional, se aplica al final del workflow, 2x upscale calidad ULTRA)
+
+## Flujo de Trabajo Actualizado
+
+1. **Prioridad 11:** Image To Video genera Video 1
+2. **Prioridad 11.5:** VideoConcat:
+   - Para cada sección adicional:
+     - Extrae últimos N frames del video anterior
+     - Genera nuevo video continuando desde esos frames
+     - Aplica color matching con frames de referencia
+   - Concatena todos con `VideoCrossFadeTransition`
+   - Aplica temporal blending en transiciones
+   - Concatena audio con `AudioCrossFade`
+   - **Aplica RTX Video Super Resolution** (2x upscale calidad ULTRA)
+   - Guarda el resultado final
 
 ## Flujo de Trabajo
 
@@ -148,7 +164,7 @@ Resultado (include_overlap): 121 + 121 = 242 frames (con overlap)
 3. `8479f05` - Remove redundant Toggleable
 4. `3141983` - Fix toggle and prompt logic
 5. `ec46789` - Major improvements: crossfade transitions, configurable modes, audio fade
-6. **Pendiente** - Add Text2Video support with Extension Model parameter
+6. **Pendiente** - Add RTX Video Super Resolution node at end of workflow
 
 ## Auto-ajustes por Modelo
 

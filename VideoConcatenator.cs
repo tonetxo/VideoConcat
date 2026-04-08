@@ -22,6 +22,7 @@ public class VideoConcatenator
     private double _temporalStrength = 0.5;
     private bool _enableAudioCrossfade = true;
     private int _audioCrossfadeFrames = 8;
+    private bool _enableRTXUpscale = false;
 
     public VideoConcatenator(WorkflowGenerator generator)
     {
@@ -71,6 +72,12 @@ public class VideoConcatenator
     {
         _enableAudioCrossfade = enabled;
         _audioCrossfadeFrames = frames;
+        return this;
+    }
+
+    public VideoConcatenator SetRTXUpscale(bool enabled)
+    {
+        _enableRTXUpscale = enabled;
         return this;
     }
 
@@ -304,8 +311,25 @@ public class VideoConcatenator
         {
             concatenatedVideo = ApplyTemporalBlend(concatenatedVideo, _temporalStrength);
         }
+
+        // Apply RTX Video Super Resolution before final save (optional, expensive)
+        if (_enableRTXUpscale)
+        {
+            JObject rtxInputs = new JObject()
+            {
+                ["images"] = concatenatedVideo,
+                ["resize_type"] = "scale by multiplier",
+                ["resize_type.scale"] = 2.0,
+                ["quality"] = "ULTRA"
+            };
+            Logs.Info($"[VideoConcat] RTX node inputs: {rtxInputs.ToString()}");
+            
+            string rtxNode = _generator.CreateNode("RTXVideoSuperResolution", rtxInputs);
+            concatenatedVideo = new JArray(rtxNode, 0);
+            Logs.Info($"[VideoConcat] Created RTXVideoSuperResolution node: {rtxNode}");
+        }
         
-        WGNodeData result = previousVideo.WithPath(concatenatedVideo);
+        WGNodeData result = currentMedia.WithPath(concatenatedVideo);
         result.Frames = totalFrames;
         result.FPS = videoFps;
         

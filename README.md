@@ -92,6 +92,29 @@ The extension includes custom ComfyUI nodes:
 - `VideoBatch`: Batch video frames together
 - `EmptyLatentVideo`: Create empty latent for video generation
 
+## RTX Video Super Resolution
+
+**Optional upscaling** applied to the final concatenated video using the `comfyui_nvidia_rtx_nodes` custom node pack.
+
+### Enable RTX Upscale
+
+Toggle in the "Video Concatenation" parameter group to enable NVIDIA RTX Video Super Resolution upscaling.
+
+- **Enabled**: Applies 2x upscaling with ULTRA quality settings
+- **Disabled** (default): No upscaling, faster generation
+- **Warning**: RTX VSR is computationally expensive and will significantly increase generation time (frame-by-frame processing)
+- **Recommendation**: Use for final output only, not for previews
+
+### Parameters
+
+- **resize_type**: "scale by multiplier" (fixed)
+- **scale**: 2x upscaling
+- **quality**: "ULTRA" (maximum quality)
+
+### Requirements
+
+The `comfyui_nvidia_rtx_nodes` custom node must be installed in ComfyUI. When enabled, the node is applied after temporal blending and before the final save.
+
 ## Architecture
 
 ```
