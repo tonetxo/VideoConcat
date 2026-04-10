@@ -91,6 +91,7 @@ The extension includes custom ComfyUI nodes:
 - `VideoCrossFadeTransition`: Create crossfade transitions between videos
 - `VideoBatch`: Batch video frames together
 - `EmptyLatentVideo`: Create empty latent for video generation
+- `VideoCacheCleanup`: Auto-free VRAM/RAM after video processing (unloads models, runs GC)
 
 ## RTX Video Super Resolution
 

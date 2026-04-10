@@ -828,6 +828,70 @@ class VideoFastSave:
         return (images,)
 
 
+class VideoCacheCleanup:
+    """
+    Cleans up GPU/CPU model caches after video processing.
+    Unloads all cached models, frees VRAM, and runs Python garbage collection.
+    Should be placed as the last node in the workflow to ensure cleanup after output.
+    """
+
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "images": ("IMAGE",),
+            },
+            "optional": {
+                "unload_models": (
+                    "BOOLEAN",
+                    {
+                        "default": True,
+                        "tooltip": "Unload all cached models from VRAM.",
+                    },
+                ),
+                "free_memory": (
+                    "BOOLEAN",
+                    {
+                        "default": True,
+                        "tooltip": "Free system RAM via garbage collection.",
+                    },
+                ),
+            },
+        }
+
+    RETURN_TYPES = ("IMAGE",)
+    FUNCTION = "cleanup"
+    CATEGORY = "SwarmUI/video"
+    OUTPUT_NODE = True
+    DESCRIPTION = (
+        "Clean up model caches after video processing. Unloads models and frees memory."
+    )
+
+    def cleanup(self, images, unload_models=True, free_memory=True):
+        if unload_models:
+            try:
+                import comfy.model_management as mm
+
+                mm.unload_all_models()
+                mm.cleanup_models()
+            except Exception:
+                pass
+
+        if free_memory:
+            try:
+                import gc
+                import torch
+
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                    torch.cuda.synchronize()
+            except Exception:
+                pass
+
+        return (images,)
+
+
 # Node mappings for ComfyUI
 NODE_CLASS_MAPPINGS = {
     "VideoColorMatch": VideoColorMatch,
@@ -837,6 +901,7 @@ NODE_CLASS_MAPPINGS = {
     "EmptyLatentVideo": EmptyLatentVideo,
     "AudioCrossFade": AudioCrossFade,
     "VideoFastSave": VideoFastSave,
+    "VideoCacheCleanup": VideoCacheCleanup,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -847,4 +912,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "EmptyLatentVideo": "Empty Latent Video (SwarmUI)",
     "AudioCrossFade": "Audio CrossFade (SwarmUI)",
     "VideoFastSave": "Video Fast Save (SwarmUI)",
+    "VideoCacheCleanup": "Video Cache Cleanup (SwarmUI)",
 }

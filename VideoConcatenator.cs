@@ -376,6 +376,17 @@ public class VideoConcatenator
             _generator.CurrentMedia.SaveOutput(originalVae, originalAudioVae, outputId);
             Logs.Info($"[VideoConcat] Generated {_sections.Count} sections, concatenated video saved with ID {outputId}");
         }
+
+        // Add cache cleanup node after all processing to free VRAM/RAM
+        // This ensures models are unloaded between successive video generations
+        string cleanupNode = _generator.CreateNode("VideoCacheCleanup", new JObject()
+        {
+            ["images"] = result.Path,
+            ["unload_models"] = true,
+            ["free_memory"] = true,
+        }, _generator.GetStableDynamicID(50000, 1));
+        
+        Logs.Info($"[VideoConcat] Cache cleanup node added: {cleanupNode}");
     }
 
     private WGNodeData GenerateContinuationSection(

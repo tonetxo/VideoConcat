@@ -83,6 +83,7 @@ src/Extensions/VideoConcat/
 | `Enable Audio Fade` | bool | true | Crossfade de audio en transiciones |
 | `Audio Crossfade Frames` | int | 8 | Frames de video (convertidos a samples automáticamente) |
 | `Extension Model` | T2IModel | "" | Modelo Image2Video para continuar secciones (requerido para Text2Video) |
+| `Enable Fast Save` | bool | true | Usar encoding GPU-accelerado (NVENC) para salida rápida |
 | `Enable RTX Upscale` | bool | false | Aplicar upscaling 2x RTX VSR (computacionalmente costoso) |
 | `Enable Fast Save` | bool | true | Usar encoding GPU-accelerado (NVENC) para salida rápida |
 
@@ -132,6 +133,7 @@ src/Extensions/VideoConcat/
 6. `3272147` - feat: add optional RTX Video Super Resolution upscaling
 7. `pending` - feat: add VideoFastSave with NVENC GPU acceleration
 8. **Pending commit** - fix: VideoFastSave grey colors + duration 0 (rewrite to use imageio_ffmpeg, add NVENC fallback)
+9. **Pending commit** - feat: add VideoCacheCleanup node to auto-free VRAM/RAM after generation
 
 ## Auto-ajustes por Modelo
 
@@ -167,3 +169,14 @@ Los ajustes se aplican automáticamente según el modelo detectado (`videoModel.
 - Añadidas flags de color space para NVENC (full range BT.709)
 - Usa `folder_paths.get_save_image_path()` para directorio temporal (como SwarmSaveAnimationWS)
 - Fallback automático CPU si NVENC falla
+
+### VideoCacheCleanup: Auto-free VRAM/RAM (v2.2.0)
+
+**Problema:** Las generaciones subsiguientes se enlentecen porque los modelos se quedan en caché en VRAM/RAM.
+
+**Solución:** Nodo ComfyUI `VideoCacheCleanup` que se ejecuta al final del workflow:
+- `comfy.model_management.unload_all_models()` — libera todos los modelos de VRAM
+- `comfy.model_management.cleanup_models()` — limpia caché de modelos
+- `torch.cuda.empty_cache()` + `gc.collect()` — libera memoria GPU y RAM del sistema
+
+Se añade automáticamente al workflow después del save final (no requiere config del usuario).
