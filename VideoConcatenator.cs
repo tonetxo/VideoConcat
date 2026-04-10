@@ -228,9 +228,9 @@ public class VideoConcatenator
         if (currentMedia.AttachedAudio != null)
         {
             WGNodeData firstAudio = currentMedia.AttachedAudio;
-            if (firstAudio.DataType == WGNodeData.DT_LATENT_AUDIO && audioVae != null)
+            if (firstAudio.DataType == WGNodeData.DT_LATENT_AUDIO && _generator.CurrentAudioVae != null)
             {
-                firstAudio = firstAudio.DecodeLatents(audioVae, true);
+                firstAudio = firstAudio.DecodeLatents(_generator.CurrentAudioVae, true);
             }
             if (firstAudio != null && firstAudio.DataType == WGNodeData.DT_AUDIO)
             {
@@ -269,12 +269,13 @@ public class VideoConcatenator
             
             videoChunks.Add(newVideo);
             
-            if (newVideo.AttachedAudio != null && audioVae != null)
+            if (newVideo.AttachedAudio != null)
             {
+                WGNodeData currentAudioVae = _generator.CurrentAudioVae ?? audioVae;
                 WGNodeData sectionAudio = newVideo.AttachedAudio;
-                if (sectionAudio.DataType == WGNodeData.DT_LATENT_AUDIO)
+                if (sectionAudio.DataType == WGNodeData.DT_LATENT_AUDIO && currentAudioVae != null)
                 {
-                    sectionAudio = sectionAudio.DecodeLatents(audioVae, true);
+                    sectionAudio = sectionAudio.DecodeLatents(currentAudioVae, true);
                 }
                 if (sectionAudio != null && sectionAudio.DataType == WGNodeData.DT_AUDIO)
                 {
@@ -339,7 +340,7 @@ public class VideoConcatenator
         WGNodeData result = currentMedia.WithPath(concatenatedVideo);
         result.Frames = totalFrames;
         result.FPS = videoFps;
-        
+
         if (audioChunks.Count > 0)
         {
             JArray concatenatedAudio = ConcatenateAudioChunks(audioChunks);
@@ -431,9 +432,16 @@ public class VideoConcatenator
         double swapPercent = _generator.UserInput.Get(T2IParamTypes.VideoSwapPercent, 0.5);
 
         WGNodeData inputForSection = previousVideo.WithPath(partialBatch);
+        inputForSection.Frames = frames;
+        inputForSection.AttachedAudio = null;
 
         // Set CurrentMedia to the partial batch (last N frames of previous video)
         // This is the input for the continuation - the model will use these frames as reference
+        // Frames must be set to the target duration so that EnsureHasAudioIfNeeded
+        // creates LTXVEmptyLatentAudio with the correct frame count for audio generation.
+        // AttachedAudio must be cleared so that EnsureHasAudioIfNeeded creates a new empty
+        // audio latent for this section instead of reusing the previous section's audio
+        // (which has the wrong duration).
         _generator.CurrentMedia = inputForSection;
 
         WorkflowGenerator.ImageToVideoGenInfo genInfo = new()

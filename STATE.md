@@ -134,8 +134,27 @@ src/Extensions/VideoConcat/
 7. `pending` - feat: add VideoFastSave with NVENC GPU acceleration
 8. **Pending commit** - fix: VideoFastSave grey colors + duration 0 (rewrite to use imageio_ffmpeg, add NVENC fallback)
 9. **Pending commit** - feat: add VideoCacheCleanup node to auto-free VRAM/RAM after generation
+10. **Pending commit** - fix: LTXV2 audio duration bug in sections with different frame counts
 
-## Auto-ajustes por Modelo
+## Bug Fixes
+
+### LTXV2 Audio Duration Bug (v2.2.1)
+
+**Problema:** Al establecer duraciones distintas a los clips (ej: 161 frames el original y 241 el de la extensión),
+solo se genera audio para 161 frames de los 241 del clip generado por la extensión.
+
+**Causa raíz:** Cuando se genera una sección de continuación con `CreateImageToVideo`, el `CurrentMedia.AttachedAudio`
+se hereda del video anterior (inputForSection). En `EnsureHasAudioIfNeeded`, si `AttachedAudio` ya existe,
+se retorna sin cambios, NO creando un nuevo `LTXVEmptyLatentAudio` con la duración correcta.
+Como resultado, el audio de la sección anterior (161 frames) se usa para la nueva sección (241 frames).
+
+**Solución:**
+- Establecer `inputForSection.AttachedAudio = null` antes de llamar a `CreateImageToVideo`
+- Esto fuerza a `EnsureHasAudioIfNeeded` a crear un nuevo `LTXVEmptyLatentAudio` con `frames_number` correcto
+- También establecer `inputForSection.Frames = frames` (duración objetivo) como respaldo
+- Usar `_generator.CurrentAudioVae` actualizado al decodificar audio de las secciones (no el capturado antes del loop)
+
+### VideoFastSave: Video gris + duración 0 (v2.2.0)
 
 Los ajustes se aplican automáticamente según el modelo detectado (`videoModel.ModelClass.CompatClass.ID`).
 
@@ -183,11 +202,13 @@ Se añade automáticamente al workflow después del save final (no requiere conf
 
 ## TODO: Audio generativo para vídeo concatenado
 
-**Problema actual:** El audio se genera por separado en cada sección y luego se hace crossfade. Esto produce transiciones de audio imperfectas entre secciones (cambios de tono, volumen, coherencia).
+**Estado:** Bug fix implementado (v2.2.1). Las continuaciones LTXV2 ahora generan audio con la duración correcta.
 
-**Enfoque mixto deseado:**
-1. **Primario:** Si el modelo soporta audio (LTXV-2, Wan con audio), generar audio nuevo para toda la duración del vídeo concatenado usando el AudioVAE.
-2. **Fallback:** Si no hay AudioVAE disponible (SVD, Hunyuan sin audio, Cosmos), mantener el crossfade actual.
+**Mejora futura (prioridad baja):**
+- **Primario:** Si el modelo soporta audio (LTXV-2), generar audio nuevo para toda la duración del vídeo concatenado usando el AudioVAE.
+  - Esto requiere pasar el vídeo concatenado por un segundo sampling con el modelo LTXV2 para generar audio coherente de principio a fin.
+  - Alternativa más simple: usar el audio de la última sección como audio completo (en lugar de crossfade), ya que el audio de cada sección ahora tiene la duración correcta.
+- **Fallback:** Si no hay AudioVAE disponible (SVD, Hunyuan sin audio, Cosmos), mantener el crossfade actual.
 
 **Complejidad técnica:**
 - Los modelos de vídeo que generan audio (LTXV-2, Wan) lo producen como parte del latent combinado (`LATENT_AUDIOVIDEO`), no separadamente.
@@ -195,16 +216,5 @@ Se añade automáticamente al workflow después del save final (no requiere conf
   1. Re-encodear el vídeo concatenado de vuelta a latent (`VAEEncode` del vídeo concatenado)
   2. Crear un `LATENT_AUDIOVIDEO` combinando el vídeo latent con audio vacío (`LTXVEmptyLatentAudio`)
   3. Decodificar solo la parte de audio con `LTXVAudioVAEDecode`
-- Esto es costoso (requiere re-encodear + decode adicional) pero produce audio coherente de principio a fin.
-
-**Nodos ComfyUI necesarios:**
-- `VideoGenerateAudio`: Recibe vídeo concatenado + AudioVAE + prompt + duración, produce audio waveform
-
-**Parámetro nuevo:**
-- `Enable Audio Regeneration` (bool, default: true) — activar/desactivar la regeneración de audio
-
-**Cambios en C#:**
-- `VideoConcatenator.cs`: Lógica condicional — si `audioVae != null` y modelo soporta audio, generar audio fresh; si no, crossfade current
-- `VideoConcatExtension.cs`: Registrar parámetro `Enable Audio Regeneration`
-
-**Prioridad:** Baja (funcionalidad actual con crossfade funciona, esto es una mejora de calidad)
+- **PROBLEMA:** `LTXVEmptyLatentAudio` + `LTXVAudioVAEDecode` sin sampling produce silencio, no audio coherente.
+- Para obtener audio coherente, necesitaríamos pasar por un KSampler con el modelo LTXV2 completo, lo cual es muy costoso.
