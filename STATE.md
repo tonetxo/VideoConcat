@@ -180,3 +180,31 @@ Los ajustes se aplican automáticamente según el modelo detectado (`videoModel.
 - `torch.cuda.empty_cache()` + `gc.collect()` — libera memoria GPU y RAM del sistema
 
 Se añade automáticamente al workflow después del save final (no requiere config del usuario).
+
+## TODO: Audio generativo para vídeo concatenado
+
+**Problema actual:** El audio se genera por separado en cada sección y luego se hace crossfade. Esto produce transiciones de audio imperfectas entre secciones (cambios de tono, volumen, coherencia).
+
+**Enfoque mixto deseado:**
+1. **Primario:** Si el modelo soporta audio (LTXV-2, Wan con audio), generar audio nuevo para toda la duración del vídeo concatenado usando el AudioVAE.
+2. **Fallback:** Si no hay AudioVAE disponible (SVD, Hunyuan sin audio, Cosmos), mantener el crossfade actual.
+
+**Complejidad técnica:**
+- Los modelos de vídeo que generan audio (LTXV-2, Wan) lo producen como parte del latent combinado (`LATENT_AUDIOVIDEO`), no separadamente.
+- Para generar audio nuevo para el vídeo concatenado, necesitaríamos:
+  1. Re-encodear el vídeo concatenado de vuelta a latent (`VAEEncode` del vídeo concatenado)
+  2. Crear un `LATENT_AUDIOVIDEO` combinando el vídeo latent con audio vacío (`LTXVEmptyLatentAudio`)
+  3. Decodificar solo la parte de audio con `LTXVAudioVAEDecode`
+- Esto es costoso (requiere re-encodear + decode adicional) pero produce audio coherente de principio a fin.
+
+**Nodos ComfyUI necesarios:**
+- `VideoGenerateAudio`: Recibe vídeo concatenado + AudioVAE + prompt + duración, produce audio waveform
+
+**Parámetro nuevo:**
+- `Enable Audio Regeneration` (bool, default: true) — activar/desactivar la regeneración de audio
+
+**Cambios en C#:**
+- `VideoConcatenator.cs`: Lógica condicional — si `audioVae != null` y modelo soporta audio, generar audio fresh; si no, crossfade current
+- `VideoConcatExtension.cs`: Registrar parámetro `Enable Audio Regeneration`
+
+**Prioridad:** Baja (funcionalidad actual con crossfade funciona, esto es una mejora de calidad)
