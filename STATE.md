@@ -130,7 +130,8 @@ src/Extensions/VideoConcat/
 4. `3141983` - Fix toggle and prompt logic
 5. `ec46789` - Major improvements: crossfade transitions, configurable modes, audio fade
 6. `3272147` - feat: add optional RTX Video Super Resolution upscaling
-7. **Pending commit** - feat: add VideoFastSave with NVENC GPU acceleration
+7. `pending` - feat: add VideoFastSave with NVENC GPU acceleration
+8. **Pending commit** - fix: VideoFastSave grey colors + duration 0 (rewrite to use imageio_ffmpeg, add NVENC fallback)
 
 ## Auto-ajustes por Modelo
 
@@ -147,3 +148,22 @@ Los ajustes se aplican automáticamente según el modelo detectado (`videoModel.
 - **LTXV**: Mantiene los valores originales del usuario
 
 **Motivo:** Wan genera desde un baseline gris (0.5) mientras LTXV usa `LTXVPreprocess` (CRF compression) que suaviza colores antes del encode.
+
+## Bug Fixes
+
+### VideoFastSave: Video gris + duración 0 (v2.2.0)
+
+**Problema:** El video resultante con "Enable Fast Save" salía gris y sin duración.
+
+**Causas raíz:**
+1. Usaba `ffmpeg` del sistema (podía no tener codecs o ser incompatible)
+2. Faltaba flag `-n` para sobreescribir sin preguntar (causa hangs)
+3. NVENC no tenía flags de color space (`-color_range pc -colorspace bt709 -color_primaries bt709 -color_trc bt709`)
+4. Usaba `tempfile.NamedTemporaryFile(delete=False)` en vez de `folder_paths` de ComfyUI
+
+**Soluciones:**
+- Usa `imageio_ffmpeg.get_ffmpeg_exe()` (mismo ffmpeg que SwarmSaveAnimationWS)
+- Añadido flag `-n` para sobreescribir sin prompt
+- Añadidas flags de color space para NVENC (full range BT.709)
+- Usa `folder_paths.get_save_image_path()` para directorio temporal (como SwarmSaveAnimationWS)
+- Fallback automático CPU si NVENC falla

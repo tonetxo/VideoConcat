@@ -1,13 +1,46 @@
 """
 Video Concatenation nodes for SwarmUI extension.
-Version: 2.0.0 - AudioCrossFade with proper channel handling
+Version: 2.2.0 - Rewrote VideoFastSave: use imageio_ffmpeg, fix NVENC colors, proper fallback
 """
 
 import torch
 import numpy as np
+import sys
+import os
+import io
+import struct
+import subprocess
+import tempfile
+import wave
 
 
-__version__ = "2.0.0"
+__version__ = "2.2.0"
+
+
+def _get_ffmpeg_path():
+    """Get ffmpeg path: prefer imageio_ffmpeg bundled binary, fallback to system ffmpeg."""
+    try:
+        from imageio_ffmpeg import get_ffmpeg_exe
+
+        ffmpeg_path = get_ffmpeg_exe()
+        if os.path.isfile(ffmpeg_path):
+            return ffmpeg_path
+    except Exception:
+        pass
+    return "ffmpeg"
+
+
+def _check_nvenc_available(ffmpeg_path=None):
+    """Check if NVENC encoding is available in the ffmpeg binary."""
+    if ffmpeg_path is None:
+        ffmpeg_path = _get_ffmpeg_path()
+    try:
+        result = subprocess.run(
+            [ffmpeg_path, "-encoders"], capture_output=True, text=True, timeout=10
+        )
+        return "h264_nvenc" in result.stdout
+    except Exception:
+        return False
 
 
 class VideoColorMatch:
@@ -41,55 +74,26 @@ class VideoColorMatch:
     DESCRIPTION = "Match colors between video sections for visual coherence."
 
     def match_colors(self, video, reference, strength):
-        """
-        Match video colors to reference using histogram matching.
-
-        Args:
-            video: Tensor of shape (frames, height, width, channels)
-            reference: Tensor of shape (ref_frames, height, width, channels)
-            strength: Float 0-1 for blend strength
-
-        Returns:
-            Color-matched video tensor
-        """
         if strength <= 0:
             return (video,)
 
-        # Compute global statistics for reference (mean and std per frame)
-        # Reference may have fewer frames (just transition frames), so we use global stats
-        ref_mean = reference.mean(
-            dim=(1, 2), keepdim=True
-        )  # Shape: (ref_frames, 1, 1, channels)
-        ref_std = (
-            reference.std(dim=(1, 2), keepdim=True) + 1e-6
-        )  # Shape: (ref_frames, 1, 1, channels)
+        ref_mean = reference.mean(dim=(1, 2), keepdim=True)
+        ref_std = reference.std(dim=(1, 2), keepdim=True) + 1e-6
 
-        # Aggregate to single global statistics
-        ref_mean_global = ref_mean.mean(
-            dim=0, keepdim=True
-        )  # Shape: (1, 1, 1, channels)
-        ref_std_global = ref_std.mean(dim=0, keepdim=True)  # Shape: (1, 1, 1, channels)
+        ref_mean_global = ref_mean.mean(dim=0, keepdim=True)
+        ref_std_global = ref_std.mean(dim=0, keepdim=True)
 
-        # Compute statistics for video (per frame)
-        vid_mean = video.mean(
-            dim=(1, 2), keepdim=True
-        )  # Shape: (frames, 1, 1, channels)
-        vid_std = (
-            video.std(dim=(1, 2), keepdim=True) + 1e-6
-        )  # Shape: (frames, 1, 1, channels)
+        vid_mean = video.mean(dim=(1, 2), keepdim=True)
+        vid_std = video.std(dim=(1, 2), keepdim=True) + 1e-6
 
-        # Expand global reference stats to match video frames
         ref_mean_expanded = ref_mean_global.expand(video.shape[0], -1, -1, -1)
         ref_std_expanded = ref_std_global.expand(video.shape[0], -1, -1, -1)
 
-        # Normalize and then apply reference statistics
         normalized = (video - vid_mean) / vid_std
         matched = normalized * ref_std_expanded + ref_mean_expanded
 
-        # Clamp to valid range
         matched = torch.clamp(matched, 0.0, 1.0)
 
-        # Blend with original based on strength
         result = video * (1 - strength) + matched * strength
 
         return (result,)
@@ -142,18 +146,6 @@ class VideoTemporalBlend:
     def temporal_blend(
         self, video, blend_strength, blend_frames, mode="transition_only"
     ):
-        """
-        Apply temporal blending using exponential moving average.
-
-        Args:
-            video: Tensor of shape (frames, height, width, channels)
-            blend_strength: Float 0-1 for blend strength
-            blend_frames: Number of frames for blending
-            mode: "transition_only" or "full_video"
-
-        Returns:
-            Temporally smoothed video tensor
-        """
         if blend_strength <= 0:
             return (video,)
 
@@ -161,17 +153,12 @@ class VideoTemporalBlend:
         result = video.clone()
 
         if mode == "transition_only":
-            # Apply blending only in transition zones (beginning and end of video)
-            # This is useful for concatenated videos where transitions are at boundaries
-
-            # Blend at the beginning (first blend_frames)
             for i in range(1, min(blend_frames, frames)):
                 factor = blend_strength * (1 - i / blend_frames)
                 result[i] = result[i] * (1 - factor * 0.5) + result[i - 1] * (
                     factor * 0.5
                 )
 
-            # Blend at the end (last blend_frames)
             for i in range(max(1, frames - blend_frames), frames):
                 factor = blend_strength * (i - (frames - blend_frames)) / blend_frames
                 if i < frames - 1:
@@ -179,12 +166,8 @@ class VideoTemporalBlend:
                         factor * 0.5
                     )
         else:
-            # full_video mode: blend across entire video
             for i in range(1, frames):
-                # Calculate blend factor based on distance and strength
                 factor = blend_strength * min(1.0, blend_frames / max(1, frames))
-
-                # Blend current frame with previous
                 result[i] = result[i] * (1 - factor * 0.5) + result[i - 1] * (
                     factor * 0.5
                 )
@@ -234,53 +217,27 @@ class VideoCrossFadeTransition:
     def crossfade(
         self, video_a, video_b, transition_frames, blend_mode, include_overlap=False
     ):
-        """
-        Crossfade between two videos.
-
-        Args:
-            video_a: First video tensor (frames_a, H, W, C)
-            video_b: Second video tensor (frames_b, H, W, C)
-            transition_frames: Number of frames for transition
-            blend_mode: Type of transition
-            include_overlap: If True, keep all frames. If False, remove overlap.
-
-        Returns:
-            Concatenated video tensor with transition
-        """
         frames_a = video_a.shape[0]
         frames_b = video_b.shape[0]
         trans = min(transition_frames, frames_a, frames_b)
 
-        # Get H, W, C from video_a
         h, w, c = video_a.shape[1], video_a.shape[2], video_a.shape[3]
 
-        # Calculate output frames based on mode
         if include_overlap:
-            # Include all frames from both videos: video_a plays fully, then video_b plays fully
-            # The transition blend happens at the boundary without removing frames
             output_frames = frames_a + frames_b
         else:
-            # Exclude overlap: the last 'trans' frames of A blend with first 'trans' frames of B
-            # Output: (frames_a - trans) + trans (blend zone) + (frames_b - trans)
-            # = frames_a + frames_b - trans
             output_frames = frames_a + frames_b - trans
 
-        # Create output tensor
         result = torch.zeros((output_frames, h, w, c), dtype=video_a.dtype)
 
         if include_overlap:
-            # Mode: include_overlap - play video_a fully, then video_b fully
-            # The transition blend is applied at the boundary
             result[:frames_a] = video_a
             result[frames_a:] = video_b
 
-            # Apply crossfade blend at the boundary: last 'trans' of A with first 'trans' of B
             for i in range(trans):
-                t = i / trans  # 0 to 1
-                idx_a = frames_a - trans + i  # Frame in video_a near end
-                idx_out = (
-                    frames_a - trans + i
-                )  # Position in output (within video_a region)
+                t = i / trans
+                idx_a = frames_a - trans + i
+                idx_out = frames_a - trans + i
 
                 if blend_mode == "crossfade":
                     result[idx_out] = video_a[idx_a] * (1 - t) + video_b[i] * t
@@ -295,14 +252,11 @@ class VideoCrossFadeTransition:
                     mask = torch.rand((h, w, c)) < t
                     result[idx_out] = torch.where(mask, video_b[i], video_a[idx_a])
         else:
-            # Mode: exclude_overlap - blend zone replaces overlap frames
-            # Copy video_a up to transition start
             non_trans_frames_a = frames_a - trans
             result[:non_trans_frames_a] = video_a[:non_trans_frames_a]
 
-            # Create transition blend zone
             for i in range(trans):
-                t = i / trans  # 0 to 1
+                t = i / trans
 
                 if blend_mode == "crossfade":
                     result[non_trans_frames_a + i] = (
@@ -331,7 +285,6 @@ class VideoCrossFadeTransition:
                         mask, video_b[i], video_a[non_trans_frames_a + i]
                     )
 
-            # Copy video_b after transition (skip the first 'trans' frames that were blended)
             result[non_trans_frames_a + trans :] = video_b[trans:]
 
         return (result,)
@@ -452,8 +405,6 @@ class AudioCrossFade:
             audio_a.get("sample_rate", 44100) if isinstance(audio_a, dict) else 44100
         )
 
-        # ComfyUI audio can be (batch, channels, samples) or (channels, samples)
-        # Normalize to (channels, samples)
         if waveform_a.dim() == 3:
             waveform_a = waveform_a.squeeze(0)
         elif waveform_a.dim() == 1:
@@ -474,7 +425,6 @@ class AudioCrossFade:
         num_channels_a = waveform_a.shape[0]
         num_channels_b = waveform_b.shape[0]
 
-        # Convert to mono by averaging channels
         if num_channels_a > 1:
             waveform_a_mono = waveform_a.mean(dim=0, keepdim=True)
         else:
@@ -485,24 +435,19 @@ class AudioCrossFade:
         else:
             waveform_b_mono = waveform_b
 
-        # Determine output channels (use the higher channel count)
         output_channels = max(num_channels_a, num_channels_b)
 
-        # Calculate output length
         non_overlap_a = samples_a - crossfade
         total_samples = samples_a + samples_b - crossfade
 
-        # Create mono result first
         result_mono = torch.zeros(
             (1, total_samples),
             dtype=waveform_a_mono.dtype,
             device=waveform_a_mono.device,
         )
 
-        # Copy non-overlapping part of audio_a
         result_mono[0, :non_overlap_a] = waveform_a_mono[0, :non_overlap_a]
 
-        # Create crossfade in overlap region
         fade_out = torch.linspace(
             1.0,
             0.0,
@@ -523,10 +468,8 @@ class AudioCrossFade:
             + waveform_b_mono[0, :crossfade] * fade_in
         )
 
-        # Copy remaining part of audio_b
         result_mono[0, samples_a:] = waveform_b_mono[0, crossfade:]
 
-        # Expand back to output channels if needed
         if output_channels > 1:
             result = result_mono.repeat(output_channels, 1)
         else:
@@ -541,6 +484,7 @@ class VideoFastSave:
     """
     Fast video save node using GPU-accelerated encoding (NVENC) when available.
     Falls back to CPU encoding with optimized settings if NVENC is not available.
+    Uses imageio_ffmpeg bundled binary for reliability.
     """
 
     @classmethod
@@ -566,37 +510,18 @@ class VideoFastSave:
     CATEGORY = "SwarmUI/video"
     DESCRIPTION = "Fast video save with GPU acceleration (NVENC) support."
 
-    def _check_nvenc_available(self):
-        """Check if NVENC (NVIDIA GPU encoding) is available."""
-        import subprocess
-
-        try:
-            result = subprocess.run(
-                ["ffmpeg", "-encoders"], capture_output=True, text=True, timeout=5
-            )
-            return "h264_nvenc" in result.stdout
-        except Exception:
-            return False
-
     def save_video(self, images, fps, quality, format, audio=None):
-        import subprocess
-        import tempfile
-        import os
-        import wave
-        import struct
-        import io
-        import numpy as np
-        from PIL import Image
         from server import PromptServer, BinaryEventTypes
 
         if images.shape[0] == 0:
             return (images,)
 
-        # For single image, return PNG
         if images.shape[0] == 1:
             return (images,)
 
-        # Quality presets
+        FFMPEG_PATH = _get_ffmpeg_path()
+        use_nvenc = _check_nvenc_available(FFMPEG_PATH)
+
         quality_settings = {
             "fast": {
                 "nvenc_preset": "p1",
@@ -619,15 +544,35 @@ class VideoFastSave:
         }
         settings = quality_settings.get(quality, quality_settings["balanced"])
 
-        # Convert tensor to numpy
         i = 255.0 * images.cpu().numpy()
         raw_images = np.clip(i, 0, 255).astype(np.uint8)
         h, w = raw_images.shape[1], raw_images.shape[2]
 
-        # Use NVENC if available, otherwise CPU encoding
-        use_nvenc = self._check_nvenc_available()
+        # Build base ffmpeg args (same pattern as SwarmSaveAnimationWS)
+        args = [
+            FFMPEG_PATH,
+            "-v",
+            "error",
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "rgb24",
+            "-s",
+            f"{w}x{h}",
+            "-r",
+            str(fps),
+            "-i",
+            "-",
+            "-n",
+        ]
 
-        # Determine encoder and args
+        audio_input = []
+        file_audio = None
+        audio_args = []
+        video_args = []
+        ext = "mp4"
+        type_num = 5
+
         if format == "h264-mp4":
             if use_nvenc:
                 video_args = [
@@ -639,6 +584,14 @@ class VideoFastSave:
                     settings["nvenc_cq"],
                     "-pix_fmt",
                     "yuv420p",
+                    "-color_range",
+                    "pc",
+                    "-colorspace",
+                    "bt709",
+                    "-color_primaries",
+                    "bt709",
+                    "-color_trc",
+                    "bt709",
                 ]
             else:
                 video_args = [
@@ -663,6 +616,16 @@ class VideoFastSave:
                     settings["nvenc_preset"],
                     "-cq",
                     settings["nvenc_cq"],
+                    "-pix_fmt",
+                    "yuv420p",
+                    "-color_range",
+                    "pc",
+                    "-colorspace",
+                    "bt709",
+                    "-color_primaries",
+                    "bt709",
+                    "-color_trc",
+                    "bt709",
                 ]
             else:
                 video_args = [
@@ -672,6 +635,8 @@ class VideoFastSave:
                     settings["cpu_preset"],
                     "-crf",
                     settings["cpu_crf"],
+                    "-pix_fmt",
+                    "yuv420p",
                 ]
             ext = "mp4"
             type_num = 5
@@ -690,37 +655,8 @@ class VideoFastSave:
             ext = "webm"
             type_num = 6
             audio_args = ["-c:a", "libopus", "-b:a", "128k"]
-        else:
-            # Default to h264
-            if use_nvenc:
-                video_args = [
-                    "-c:v",
-                    "h264_nvenc",
-                    "-preset",
-                    settings["nvenc_preset"],
-                    "-cq",
-                    settings["nvenc_cq"],
-                    "-pix_fmt",
-                    "yuv420p",
-                ]
-            else:
-                video_args = [
-                    "-c:v",
-                    "libx264",
-                    "-preset",
-                    settings["cpu_preset"],
-                    "-crf",
-                    settings["cpu_crf"],
-                    "-pix_fmt",
-                    "yuv420p",
-                ]
-            ext = "mp4"
-            type_num = 5
-            audio_args = ["-c:a", "aac", "-b:a", "192k"]
 
         # Prepare audio if present
-        audio_input = []
-        file_audio = None
         if audio is not None and audio_args:
             waveform = (
                 audio.get("waveform", audio) if isinstance(audio, dict) else audio
@@ -732,6 +668,7 @@ class VideoFastSave:
             if waveform.dim() == 3:
                 waveform = waveform.squeeze(0)
 
+            channels = waveform.shape[0]
             num_audio_samples = waveform.shape[-1]
             video_duration = len(raw_images) / fps
             target_samples = int(video_duration * sample_rate)
@@ -740,58 +677,48 @@ class VideoFastSave:
             if num_audio_samples > target_samples:
                 audio_np = audio_np[:, :target_samples]
             elif num_audio_samples < target_samples:
-                channels = audio_np.shape[0]
                 padding = np.zeros(
                     (channels, target_samples - num_audio_samples), dtype=audio_np.dtype
                 )
                 audio_np = np.concatenate([audio_np, padding], axis=1)
 
+            import random as _random
+
+            rand = "%016x" % _random.getrandbits(64)
+            from folder_paths import get_temp_directory, get_save_image_path
+
+            path = get_save_image_path("swarm_vfs_", get_temp_directory())[0]
+            file_audio = os.path.join(path, f"swarm_vfs_{rand}_audio.wav")
             audio_int16 = (np.clip(audio_np.T, -1.0, 1.0) * 32767).astype(np.int16)
-
-            import tempfile
-
-            file_audio = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
-            with wave.open(file_audio.name, "wb") as wav_file:
-                wav_file.setnchannels(audio_np.shape[0])
+            with wave.open(file_audio, "wb") as wav_file:
+                wav_file.setnchannels(channels)
                 wav_file.setsampwidth(2)
                 wav_file.setframerate(sample_rate)
                 wav_file.writeframes(audio_int16.tobytes())
-            audio_input = ["-i", file_audio.name]
+            audio_input = ["-i", file_audio]
+        else:
+            audio_args_list = [] if not audio_args else audio_args
+            if audio is None:
+                audio_args = []
 
-        # Create temporary output file
-        import tempfile
+        # Build output file path
+        import random as _random2
 
-        file_out = tempfile.NamedTemporaryFile(suffix=f".{ext}", delete=False)
+        rand2 = "%016x" % _random2.getrandbits(64)
+        from folder_paths import get_temp_directory, get_save_image_path as _get_path
 
-        # Build ffmpeg command
-        ffmpeg_args = (
-            [
-                "ffmpeg",
-                "-v",
-                "error",
-                "-f",
-                "rawvideo",
-                "-pix_fmt",
-                "rgb24",
-                "-s",
-                f"{w}x{h}",
-                "-r",
-                str(fps),
-                "-i",
-                "-",
-            ]
-            + audio_input
-            + video_args
-            + audio_args
-            + [file_out.name]
-        )
+        path = _get_path("swarm_vfs_", get_temp_directory())[0]
+        file_out = os.path.join(path, f"swarm_vfs_{rand2}.{ext}")
+
+        # Full ffmpeg command
+        cmd = args + audio_input + video_args + audio_args + [file_out]
 
         try:
             result = subprocess.run(
-                ffmpeg_args,
+                cmd,
                 input=raw_images.tobytes(),
                 capture_output=True,
-                timeout=300,  # 5 minute timeout
+                timeout=600,
             )
 
             if result.returncode != 0:
@@ -799,10 +726,76 @@ class VideoFastSave:
                     f"[VideoFastSave] ffmpeg failed: {result.stderr.decode('utf-8')}",
                     file=sys.stderr,
                 )
-                return (images,)
+                # Fallback: try CPU encoding if NVENC failed
+                if use_nvenc and format != "webm":
+                    print(
+                        "[VideoFastSave] NVENC failed, falling back to CPU encoding",
+                        file=sys.stderr,
+                    )
+                    fallback_crf = settings.get("cpu_crf", "20")
+                    fallback_preset = settings.get("cpu_preset", "veryfast")
+                    if format == "h264-mp4":
+                        fallback_video_args = [
+                            "-c:v",
+                            "libx264",
+                            "-preset",
+                            fallback_preset,
+                            "-crf",
+                            fallback_crf,
+                            "-pix_fmt",
+                            "yuv420p",
+                        ]
+                    else:
+                        fallback_video_args = [
+                            "-c:v",
+                            "libx265",
+                            "-preset",
+                            fallback_preset,
+                            "-crf",
+                            fallback_crf,
+                            "-pix_fmt",
+                            "yuv420p",
+                        ]
+                    fallback_cmd = (
+                        [
+                            FFMPEG_PATH,
+                            "-v",
+                            "error",
+                            "-f",
+                            "rawvideo",
+                            "-pix_fmt",
+                            "rgb24",
+                            "-s",
+                            f"{w}x{h}",
+                            "-r",
+                            str(fps),
+                            "-i",
+                            "-",
+                            "-n",
+                        ]
+                        + audio_input
+                        + fallback_video_args
+                        + (audio_args if audio else [])
+                        + [file_out]
+                    )
 
-            # Read output and send to server
-            with open(file_out.name, "rb") as f:
+                    result = subprocess.run(
+                        fallback_cmd,
+                        input=raw_images.tobytes(),
+                        capture_output=True,
+                        timeout=600,
+                    )
+                    if result.returncode != 0:
+                        print(
+                            f"[VideoFastSave] Fallback also failed: {result.stderr.decode('utf-8')}",
+                            file=sys.stderr,
+                        )
+                        return (images,)
+                else:
+                    return (images,)
+
+            # Read output file and send to SwarmUI server
+            with open(file_out, "rb") as f:
                 out_data = f.read()
 
             out = io.BytesIO()
@@ -820,14 +813,15 @@ class VideoFastSave:
             )
 
         finally:
-            # Cleanup
             try:
-                os.unlink(file_out.name)
+                if os.path.exists(file_out):
+                    os.remove(file_out)
             except Exception:
                 pass
             if file_audio:
                 try:
-                    os.unlink(file_audio.name)
+                    if os.path.exists(file_audio):
+                        os.remove(file_audio)
                 except Exception:
                     pass
 
@@ -845,7 +839,6 @@ NODE_CLASS_MAPPINGS = {
     "VideoFastSave": VideoFastSave,
 }
 
-# Human-readable display names
 NODE_DISPLAY_NAME_MAPPINGS = {
     "VideoColorMatch": "Video Color Match (SwarmUI)",
     "VideoTemporalBlend": "Video Temporal Blend (SwarmUI)",
