@@ -32,15 +32,18 @@ def _get_ffmpeg_path():
 
 def _check_nvenc_available(ffmpeg_path=None):
     """Check if NVENC encoding is available in the ffmpeg binary."""
-    if ffmpeg_path is None:
-        ffmpeg_path = _get_ffmpeg_path()
-    try:
-        result = subprocess.run(
-            [ffmpeg_path, "-encoders"], capture_output=True, text=True, timeout=10
-        )
-        return "h264_nvenc" in result.stdout
-    except Exception:
-        return False
+    for path in [ffmpeg_path or _get_ffmpeg_path(), "ffmpeg"]:
+        if not path:
+            continue
+        try:
+            result = subprocess.run(
+                [path, "-encoders"], capture_output=True, text=True, timeout=10
+            )
+            if "h264_nvenc" in result.stdout:
+                return True
+        except Exception:
+            continue
+    return False
 
 
 class VideoColorMatch:
@@ -497,7 +500,7 @@ class VideoFastSave:
                     {"default": 24.0, "min": 0.01, "max": 120.0, "step": 0.01},
                 ),
                 "quality": (["fast", "balanced", "quality"], {"default": "balanced"}),
-                "format": (["h264-mp4", "h265-mp4", "webm"], {"default": "h264-mp4"}),
+                "format": (["h264-mp4", "h265-mp4", "h264_nvenc-mp4", "h265_nvenc-mp4", "webm"], {"default": "h264-mp4"}),
             },
             "optional": {
                 "audio": ("AUDIO",),
@@ -521,6 +524,7 @@ class VideoFastSave:
 
         FFMPEG_PATH = _get_ffmpeg_path()
         use_nvenc = _check_nvenc_available(FFMPEG_PATH)
+        ffmpeg_exe = "ffmpeg" if format in ("h264_nvenc-mp4", "h265_nvenc-mp4") else FFMPEG_PATH
 
         quality_settings = {
             "fast": {
@@ -550,7 +554,7 @@ class VideoFastSave:
 
         # Build base ffmpeg args (same pattern as SwarmSaveAnimationWS)
         args = [
-            FFMPEG_PATH,
+            ffmpeg_exe,
             "-v",
             "error",
             "-f",
@@ -641,6 +645,34 @@ class VideoFastSave:
             ext = "mp4"
             type_num = 5
             audio_args = ["-c:a", "aac", "-b:a", "192k"]
+        elif format == "h264_nvenc-mp4":
+            video_args = [
+                "-c:v", "h264_nvenc",
+                "-preset", settings["nvenc_preset"],
+                "-cq", settings["nvenc_cq"],
+                "-pix_fmt", "yuv420p",
+                "-color_range", "pc",
+                "-colorspace", "bt709",
+                "-color_primaries", "bt709",
+                "-color_trc", "bt709",
+            ]
+            ext = "mp4"
+            type_num = 5
+            audio_args = ["-c:a", "aac", "-b:a", "192k"]
+        elif format == "h265_nvenc-mp4":
+            video_args = [
+                "-c:v", "hevc_nvenc",
+                "-preset", settings["nvenc_preset"],
+                "-cq", settings["nvenc_cq"],
+                "-pix_fmt", "yuv420p",
+                "-color_range", "pc",
+                "-colorspace", "bt709",
+                "-color_primaries", "bt709",
+                "-color_trc", "bt709",
+            ]
+            ext = "mp4"
+            type_num = 5
+            audio_args = ["-c:a", "aac", "-b:a", "192k"]
         elif format == "webm":
             video_args = [
                 "-c:v",
@@ -710,13 +742,21 @@ class VideoFastSave:
         path = _get_path("swarm_vfs_", get_temp_directory())[0]
         file_out = os.path.join(path, f"swarm_vfs_{rand2}.{ext}")
 
+        # Write raw frames to temp file (avoids pipe bottleneck)
+        raw_file = os.path.join(path, f"swarm_vfs_{rand2}_raw.rgb")
+        with open(raw_file, "wb") as f:
+            f.write(raw_images.tobytes())
+
+        # Use temp file instead of stdin pipe
+        idx = args.index("-i")
+        args[idx + 1] = raw_file
+
         # Full ffmpeg command
         cmd = args + audio_input + video_args + audio_args + [file_out]
 
         try:
             result = subprocess.run(
                 cmd,
-                input=raw_images.tobytes(),
                 capture_output=True,
                 timeout=600,
             )
@@ -734,7 +774,7 @@ class VideoFastSave:
                     )
                     fallback_crf = settings.get("cpu_crf", "20")
                     fallback_preset = settings.get("cpu_preset", "veryfast")
-                    if format == "h264-mp4":
+                    if format in ("h264-mp4", "h264_nvenc-mp4"):
                         fallback_video_args = [
                             "-c:v",
                             "libx264",
@@ -770,7 +810,7 @@ class VideoFastSave:
                             "-r",
                             str(fps),
                             "-i",
-                            "-",
+                            raw_file,
                             "-n",
                         ]
                         + audio_input
@@ -781,7 +821,6 @@ class VideoFastSave:
 
                     result = subprocess.run(
                         fallback_cmd,
-                        input=raw_images.tobytes(),
                         capture_output=True,
                         timeout=600,
                     )
@@ -816,6 +855,11 @@ class VideoFastSave:
             try:
                 if os.path.exists(file_out):
                     os.remove(file_out)
+            except Exception:
+                pass
+            try:
+                if os.path.exists(raw_file):
+                    os.remove(raw_file)
             except Exception:
                 pass
             if file_audio:
