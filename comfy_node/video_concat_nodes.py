@@ -515,6 +515,7 @@ class VideoFastSave:
 
     def save_video(self, images, fps, quality, format, audio=None):
         from server import PromptServer, BinaryEventTypes
+        import time as _time
 
         if images.shape[0] == 0:
             return (images,)
@@ -522,9 +523,13 @@ class VideoFastSave:
         if images.shape[0] == 1:
             return (images,)
 
+        _t0 = _time.time()
+
         FFMPEG_PATH = _get_ffmpeg_path()
         use_nvenc = _check_nvenc_available(FFMPEG_PATH)
-        ffmpeg_exe = "ffmpeg" if format in ("h264_nvenc-mp4", "h265_nvenc-mp4") else FFMPEG_PATH
+        ffmpeg_exe = "ffmpeg" if use_nvenc else FFMPEG_PATH
+
+        print(f"[VideoFastSave] FFMPEG_PATH={FFMPEG_PATH}, use_nvenc={use_nvenc}, ffmpeg_exe={ffmpeg_exe}, format={format}", file=sys.stderr)
 
         quality_settings = {
             "fast": {
@@ -548,9 +553,11 @@ class VideoFastSave:
         }
         settings = quality_settings.get(quality, quality_settings["balanced"])
 
-        i = 255.0 * images.cpu().numpy()
-        raw_images = np.clip(i, 0, 255).astype(np.uint8)
+        images_gpu = (255.0 * images).clamp_(0, 255).to(torch.uint8)
+        raw_images = images_gpu.cpu().numpy()
+        del images_gpu
         h, w = raw_images.shape[1], raw_images.shape[2]
+        print(f"[VideoFastSave] CPU+numpy conversion: {_time.time()-_t0:.2f}s, shape={raw_images.shape}, size={raw_images.nbytes/1048576:.1f}MB", file=sys.stderr)
 
         # Build base ffmpeg args (same pattern as SwarmSaveAnimationWS)
         args = [
@@ -744,8 +751,10 @@ class VideoFastSave:
 
         # Write raw frames to temp file (avoids pipe bottleneck)
         raw_file = os.path.join(path, f"swarm_vfs_{rand2}_raw.rgb")
+        _t1 = _time.time()
         with open(raw_file, "wb") as f:
             f.write(raw_images.tobytes())
+        print(f"[VideoFastSave] Raw file write: {_time.time()-_t1:.2f}s, file={raw_file}", file=sys.stderr)
 
         # Use temp file instead of stdin pipe
         idx = args.index("-i")
@@ -753,13 +762,16 @@ class VideoFastSave:
 
         # Full ffmpeg command
         cmd = args + audio_input + video_args + audio_args + [file_out]
+        print(f"[VideoFastSave] FFmpeg cmd: {' '.join(cmd)}", file=sys.stderr)
 
         try:
+            _t2 = _time.time()
             result = subprocess.run(
                 cmd,
                 capture_output=True,
                 timeout=600,
             )
+            print(f"[VideoFastSave] FFmpeg encoding: {_time.time()-_t2:.2f}s, returncode={result.returncode}", file=sys.stderr)
 
             if result.returncode != 0:
                 print(
@@ -798,7 +810,7 @@ class VideoFastSave:
                         ]
                     fallback_cmd = (
                         [
-                            FFMPEG_PATH,
+                            ffmpeg_exe,
                             "-v",
                             "error",
                             "-f",
