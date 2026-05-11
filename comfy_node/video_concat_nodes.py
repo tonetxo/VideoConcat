@@ -49,8 +49,8 @@ def _check_nvenc_available(ffmpeg_path=None):
 class VideoColorMatch:
     """
     Matches the color distribution of a video to a reference video.
-    Uses per-channel CDF matching for natural color transfer.
-    Applied only to the first 'blend_frames' frames with linear strength decay.
+    Uses per-channel statistics matching. Applied only to the first
+    'blend_frames' frames with linear strength decay.
     """
 
     @classmethod
@@ -87,43 +87,25 @@ class VideoColorMatch:
     CATEGORY = "SwarmUI/video"
     DESCRIPTION = "Match colors between video sections for visual coherence."
 
-    @staticmethod
-    def _match_channel_cdf(src, ref):
-        sorted_src, src_idx = src.sort()
-        sorted_ref = ref.sort()[0]
-        n_src = sorted_src.shape[0]
-        n_ref = sorted_ref.shape[0]
-        ranks = torch.empty(n_src, device=src.device, dtype=src.dtype)
-        ranks[src_idx] = torch.arange(n_src, device=src.device, dtype=src.dtype) / max(n_src - 1, 1)
-        ref_ranks = torch.arange(n_ref, device=ref.device, dtype=ref.dtype) / max(n_ref - 1, 1)
-        matched = torch.empty_like(src)
-        interp_idx = torch.searchsorted(ref_ranks, ranks)
-        interp_idx = interp_idx.clamp(max=n_ref - 1)
-        matched[src_idx] = sorted_ref[interp_idx]
-        return matched
-
     def match_colors(self, video, reference, strength, blend_frames=0):
         if strength <= 0:
             return (video,)
 
-        num_frames = video.shape[0]
-        orig_shape = video.shape
-        matched = video.clone()
+        ref_flat = reference.reshape(-1, reference.shape[-1])
+        ref_mean = ref_flat.mean(dim=0).reshape(1, 1, 1, -1)
+        ref_std = ref_flat.std(dim=0).clamp(min=0.01).reshape(1, 1, 1, -1)
 
-        src_flat = video.reshape(-1, orig_shape[-1])
-        ref_flat = reference.reshape(-1, orig_shape[-1])
-        result_flat = src_flat.clone()
+        vid_mean = video.mean(dim=(1, 2), keepdim=True)
+        vid_std = video.std(dim=(1, 2), keepdim=True).clamp(min=0.01)
 
-        for c in range(orig_shape[-1]):
-            result_flat[:, c] = self._match_channel_cdf(src_flat[:, c], ref_flat[:, c])
+        normalized = (video - vid_mean) / vid_std
+        matched = normalized * ref_std + ref_mean
 
-        matched = result_flat.reshape(orig_shape)
-
-        if blend_frames > 0 and blend_frames < num_frames:
-            decay = torch.zeros(num_frames, device=video.device, dtype=video.dtype)
-            for f in range(blend_frames):
-                decay[f] = strength * (1.0 - f / blend_frames)
-            weight = decay.view(num_frames, 1, 1, 1)
+        if blend_frames > 0 and blend_frames < video.shape[0]:
+            decay = torch.linspace(strength, 0.0, blend_frames, device=video.device, dtype=video.dtype)
+            weight = torch.zeros(video.shape[0], device=video.device, dtype=video.dtype)
+            weight[:blend_frames] = decay
+            weight = weight.view(-1, 1, 1, 1)
             result = video * (1 - weight) + matched * weight
         else:
             result = video * (1 - strength) + matched * strength
