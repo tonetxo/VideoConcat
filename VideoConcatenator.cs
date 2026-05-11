@@ -296,9 +296,8 @@ public class VideoConcatenator
             
             if (isWan)
             {
-                strength = Math.Min(1.0, _colorStrength * 1.4);
                 refFrameCount = GetValidTransitionFrames((int)(_transitionFrames * 1.5), continuationModel);
-                Logs.Info($"[VideoConcat] Wan color match: strength {_colorStrength:F2}->{strength:F2}, refFrames {_transitionFrames}->{refFrameCount}");
+                Logs.Info($"[VideoConcat] Wan color match: refFrames {_transitionFrames}->{refFrameCount}");
             }
             
             for (int i = 1; i < videoChunks.Count; i++)
@@ -308,7 +307,7 @@ public class VideoConcatenator
                 
                 JArray refFrames = ExtractLastFrames(previousChunk.Path, refFrameCount);
                 
-                JArray colorMatched = ApplyColorMatching(currentChunk.Path, refFrames, strength);
+                JArray colorMatched = ApplyColorMatching(currentChunk.Path, refFrames, strength, refFrameCount);
                 videoChunks[i] = currentChunk.WithPath(colorMatched);
             }
         }
@@ -581,13 +580,14 @@ public class VideoConcatenator
         return [extractNode, 0];
     }
 
-    private JArray ApplyColorMatching(JArray currentVideo, JArray referenceVideo, double strength)
+    private JArray ApplyColorMatching(JArray currentVideo, JArray referenceVideo, double strength, int blendFrames = 0)
     {
         string colorMatchNode = _generator.CreateNode("VideoColorMatch", new JObject()
         {
             ["video"] = currentVideo,
             ["reference"] = referenceVideo,
-            ["strength"] = strength
+            ["strength"] = strength,
+            ["blend_frames"] = blendFrames
         });
         return [colorMatchNode, 0];
     }
