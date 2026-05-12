@@ -1006,8 +1006,11 @@ class VideoAutoCaption:
         from transformers import AutoModelForCausalLM, AutoProcessor
         device = mm.get_torch_device()
         dtype = mm.unet_dtype()
-        if dtype.is_fp8:
-            dtype = torch.float16
+        try:
+            if dtype.is_fp8:
+                dtype = torch.float16
+        except AttributeError:
+            pass
         processor = AutoProcessor.from_pretrained(model_name, trust_remote_code=True)
         model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=dtype, trust_remote_code=True).to(device)
         patcher = comfy.model_patcher.ModelPatcher(model, load_device=device, offload_device=mm.unet_offload_device())
