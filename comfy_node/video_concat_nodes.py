@@ -999,6 +999,7 @@ class VideoAutoCaption:
         import comfy.model_management as mm
         processor = florence2_model['processor']
         patcher = florence2_model['patcher']
+        dtype = florence2_model.get('dtype', torch.float16)
         mm.load_model_gpu(patcher)
         model = patcher.model
 
@@ -1014,11 +1015,12 @@ class VideoAutoCaption:
             "prompt_gen_mixed_caption_plus": "<MIXED_CAPTION_PLUS>",
         }
         task_token = task_map.get(task, "<MORE_DETAILED_CAPTION>")
-        inputs = processor(text=task_token, images=pil_image, return_tensors="pt").to(model.device)
+        inputs = processor(text=task_token, images=pil_image)
 
         with torch.no_grad():
             generated_ids = model.generate(
-                input_ids=inputs["input_ids"], pixel_values=inputs["pixel_values"],
+                input_ids=inputs["input_ids"].to(patcher.load_device),
+                pixel_values=inputs["pixel_values"].to(dtype=dtype, device=patcher.load_device),
                 max_new_tokens=max_new_tokens, num_beams=num_beams, do_sample=num_beams == 1,
             )
         generated_text = processor.batch_decode(generated_ids, skip_special_tokens=False)[0]
