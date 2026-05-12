@@ -26,6 +26,7 @@ public class VideoConcatExtension : Extension
     public static T2IRegisteredParam<T2IModel> VideoConcatExtensionModel;
     public static T2IRegisteredParam<bool> VideoConcatEnableRTXUpscale;
     public static T2IRegisteredParam<bool> VideoConcatEnableFastSave;
+    public static T2IRegisteredParam<bool> VideoConcatEnableAutoCaption;
 
     public override void OnPreInit()
     {
@@ -267,6 +268,20 @@ public class VideoConcatExtension : Extension
             FeatureFlag: "video",
             DoNotPreview: true
         ));
+
+        VideoConcatEnableAutoCaption = T2IParamTypes.Register<bool>(new T2IParamType(
+            Name: "Enable Auto Caption",
+            Description: "Automatically describe the last frame of each section using Florence 2,\n" +
+                         "and inject the description into the next section's prompt.\n" +
+                         "Helps the model maintain visual coherence between clips\n" +
+                         "by knowing what the previous section looked like.\n" +
+                         "Format: '[Florence caption]. [Your section prompt]'",
+            Default: "false",
+            Group: VideoConcatGroup,
+            OrderPriority: priority++,
+            FeatureFlag: "video",
+            DoNotPreview: true
+        ));
     }
 
     private static void RegisterWorkflowStep()
@@ -344,6 +359,7 @@ public class VideoConcatExtension : Extension
             int audioCrossfadeFrames = g.UserInput.Get(VideoConcatAudioCrossfadeFrames, 8);
             bool enableRTXUpscale = g.UserInput.Get(VideoConcatEnableRTXUpscale, false);
             bool enableFastSave = g.UserInput.Get(VideoConcatEnableFastSave, true);
+            bool enableAutoCaption = g.UserInput.Get(VideoConcatEnableAutoCaption, false);
 
             try
             {
@@ -363,6 +379,7 @@ public class VideoConcatExtension : Extension
                     .SetAudioCrossfade(enableAudioCrossfade, audioCrossfadeFrames)
                     .SetRTXUpscale(enableRTXUpscale)
                     .SetFastSave(enableFastSave)
+                    .SetAutoCaption(enableAutoCaption)
                     .Concatenate();
             }
             catch (Exception ex)

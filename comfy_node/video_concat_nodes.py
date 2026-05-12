@@ -960,6 +960,105 @@ class VideoCacheCleanup:
         return (images,)
 
 
+class VideoAutoCaption:
+    """
+    Captions an image using Florence 2 and concatenates the caption
+    with a user prompt, returning the combined string.
+    """
+
+    _florence_model = None
+    _florence_processor = None
+    _florence_patcher = None
+
+    @classmethod
+    def INPUT_TYPES(s):
+        return {
+            "required": {
+                "image": ("IMAGE",),
+                "prompt": ("STRING", {"default": "", "multiline": True}),
+                "task": (
+                    ["more_detailed_caption", "detailed_caption", "caption",
+                     "prompt_gen_mixed_caption", "prompt_gen_mixed_caption_plus"],
+                    {"default": "more_detailed_caption"},
+                ),
+            },
+            "optional": {
+                "model_name": ("STRING", {"default": "microsoft/Florence-2-large"}),
+                "keep_model_loaded": ("BOOLEAN", {"default": True}),
+                "max_new_tokens": ("INT", {"default": 128, "min": 32, "max": 512}),
+                "num_beams": ("INT", {"default": 3, "min": 1, "max": 16}),
+            }
+        }
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("combined_prompt",)
+    FUNCTION = "caption_and_concat"
+    CATEGORY = "SwarmUI/video"
+    DESCRIPTION = "Describe an image with Florence 2 and concatenate with the user prompt."
+
+    @staticmethod
+    def _load_florence(model_name):
+        if VideoAutoCaption._florence_model is not None:
+            return VideoAutoCaption._florence_patcher, VideoAutoCaption._florence_processor
+
+        import comfy.model_management as mm
+        from transformers import AutoModelForCausalLM, AutoProcessor
+        device = mm.get_torch_device()
+        dtype = mm.unet_dtype()
+        if dtype.is_fp8:
+            dtype = torch.float16
+        processor = AutoProcessor.from_pretrained(model_name, trust_remote_code=True)
+        model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=dtype, trust_remote_code=True).to(device)
+        patcher = comfy.model_patcher.ModelPatcher(model, load_device=device, offload_device=mm.unet_offload_device())
+        mm.load_model_gpu(patcher)
+        VideoAutoCaption._florence_model = model
+        VideoAutoCaption._florence_processor = processor
+        VideoAutoCaption._florence_patcher = patcher
+        return patcher, processor
+
+    def caption_and_concat(self, image, prompt, task, model_name="microsoft/Florence-2-large",
+                           keep_model_loaded=True, max_new_tokens=128, num_beams=3):
+        patcher, processor = self._load_florence(model_name)
+        model = patcher.model
+
+        if image.dim() == 4:
+            image = image[0]
+        pil_image = Image.fromarray((image.cpu().numpy() * 255).clip(0, 255).astype(np.uint8))
+
+        task_map = {
+            "caption": "<CAPTION>",
+            "detailed_caption": "<DETAILED_CAPTION>",
+            "more_detailed_caption": "<MORE_DETAILED_CAPTION>",
+            "prompt_gen_mixed_caption": "<MIXED_CAPTION>",
+            "prompt_gen_mixed_caption_plus": "<MIXED_CAPTION_PLUS>",
+        }
+        task_token = task_map.get(task, "<MORE_DETAILED_CAPTION>")
+        inputs = processor(text=task_token, images=pil_image, return_tensors="pt").to(model.device)
+
+        with torch.no_grad():
+            generated_ids = model.generate(
+                input_ids=inputs["input_ids"], pixel_values=inputs["pixel_values"],
+                max_new_tokens=max_new_tokens, num_beams=num_beams, do_sample=num_beams == 1,
+            )
+        generated_text = processor.batch_decode(generated_ids, skip_special_tokens=False)[0]
+        parsed = processor.post_process_generation(generated_text, task=task, image_size=pil_image.size)
+        caption = parsed.get(task, "").strip()
+
+        if not keep_model_loaded:
+            try:
+                import comfy.model_management as mm
+                mm.unload_model_gpu(patcher)
+                VideoAutoCaption._florence_model = None
+                VideoAutoCaption._florence_processor = None
+                VideoAutoCaption._florence_patcher = None
+            except Exception:
+                pass
+
+        combined = f"{caption}. {prompt.strip()}" if prompt.strip() else caption
+        print(f"[VideoAutoCaption] {combined[:120]}{'...' if len(combined) > 120 else ''}", file=sys.stderr)
+        return (combined,)
+
+
 # Node mappings for ComfyUI
 NODE_CLASS_MAPPINGS = {
     "VideoColorMatch": VideoColorMatch,
@@ -970,6 +1069,7 @@ NODE_CLASS_MAPPINGS = {
     "AudioCrossFade": AudioCrossFade,
     "VideoFastSave": VideoFastSave,
     "VideoCacheCleanup": VideoCacheCleanup,
+    "VideoAutoCaption": VideoAutoCaption,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -981,4 +1081,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "AudioCrossFade": "Audio CrossFade (SwarmUI)",
     "VideoFastSave": "Video Fast Save (SwarmUI)",
     "VideoCacheCleanup": "Video Cache Cleanup (SwarmUI)",
+    "VideoAutoCaption": "Video Auto Caption (SwarmUI)",
 }

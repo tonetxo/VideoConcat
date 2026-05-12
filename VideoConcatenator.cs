@@ -24,6 +24,7 @@ public class VideoConcatenator
     private int _audioCrossfadeFrames = 8;
     private bool _enableRTXUpscale = false;
     private bool _enableFastSave = true;
+    private bool _enableAutoCaption = false;
 
     public VideoConcatenator(WorkflowGenerator generator)
     {
@@ -85,6 +86,12 @@ public class VideoConcatenator
     public VideoConcatenator SetFastSave(bool enabled)
     {
         _enableFastSave = enabled;
+        return this;
+    }
+
+    public VideoConcatenator SetAutoCaption(bool enabled)
+    {
+        _enableAutoCaption = enabled;
         return this;
     }
 
@@ -260,10 +267,27 @@ public class VideoConcatenator
 
             Logs.Info($"[VideoConcat] Section {i}: frames={frames}, prompt='{prompt.Substring(0, Math.Min(50, prompt.Length))}...', steps={sectionSteps}, seed={sectionSeed}");
 
+            int preId = _generator.LastID;
+
             WGNodeData newVideo = GenerateContinuationSection(
                 continuationModel, previousVideo, frames, videoFps ?? 24, sectionSteps, sectionCfg,
                 width, height, widthArr, heightArr, prompt, negPrompt, sectionSeed, i
             );
+
+            // Diagnostic: log class_type of all nodes created
+            Logs.Debug($"[VideoConcat] --- Nodes created for section {i} (IDs {preId}-{_generator.LastID - 1}) ---");
+            for (int nid = preId; nid < _generator.LastID; nid++)
+            {
+                if (_generator.Workflow.TryGetValue(nid.ToString(), out JToken n) && n is JObject obj)
+                {
+                    string ctype = obj["class_type"]?.ToString() ?? "?";
+                    if (ctype.Contains("Text") || ctype.Contains("Condition") || ctype.Contains("LTXV") || ctype.Contains("Clip"))
+                    {
+                        Logs.Debug($"[VideoConcat]   Node {nid}: {ctype}");
+                    }
+                }
+            }
+            Logs.Debug($"[VideoConcat] --- End ---");
 
             Logs.Info($"[VideoConcat] Section {i} generated: Frames={newVideo.Frames}, DataType={newVideo.DataType}");
             
