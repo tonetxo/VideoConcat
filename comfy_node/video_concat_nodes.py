@@ -962,13 +962,10 @@ class VideoCacheCleanup:
 
 class VideoAutoCaption:
     """
-    Captions an image using Florence 2, concatenates with the user prompt,
-    encodes with CLIP, and returns conditioning. Replaces CLIPTextEncode.
+    Captions an image using the provided Florence 2 model, concatenates with
+    user prompt, encodes with CLIP, and returns conditioning.
+    Uses FL2MODEL from Florence2LoadModel for model management compatibility.
     """
-
-    _florence_model = None
-    _florence_processor = None
-    _florence_patcher = None
 
     @classmethod
     def INPUT_TYPES(s):
@@ -977,6 +974,7 @@ class VideoAutoCaption:
                 "image": ("IMAGE",),
                 "prompt": ("STRING", {"default": "", "multiline": True}),
                 "clip": ("CLIP",),
+                "florence2_model": ("FL2MODEL",),
                 "task": (
                     ["more_detailed_caption", "detailed_caption", "caption",
                      "prompt_gen_mixed_caption", "prompt_gen_mixed_caption_plus"],
@@ -984,8 +982,6 @@ class VideoAutoCaption:
                 ),
             },
             "optional": {
-                "model_name": ("STRING", {"default": "microsoft/Florence-2-large"}),
-                "keep_model_loaded": ("BOOLEAN", {"default": True}),
                 "max_new_tokens": ("INT", {"default": 128, "min": 32, "max": 512}),
                 "num_beams": ("INT", {"default": 3, "min": 1, "max": 16}),
             }
@@ -997,32 +993,12 @@ class VideoAutoCaption:
     CATEGORY = "SwarmUI/video"
     DESCRIPTION = "Caption an image with Florence 2, concatenate with prompt, encode with CLIP, return conditioning."
 
-    @staticmethod
-    def _load_florence(model_name):
-        if VideoAutoCaption._florence_model is not None:
-            return VideoAutoCaption._florence_patcher, VideoAutoCaption._florence_processor
-
+    def encode(self, image, prompt, clip, florence2_model, task,
+               max_new_tokens=128, num_beams=3):
         import comfy.model_management as mm
-        from transformers import AutoModelForCausalLM, AutoProcessor
-        device = mm.get_torch_device()
-        dtype = mm.unet_dtype()
-        try:
-            if dtype.is_fp8:
-                dtype = torch.float16
-        except AttributeError:
-            pass
-        processor = AutoProcessor.from_pretrained(model_name, trust_remote_code=True)
-        model = AutoModelForCausalLM.from_pretrained(model_name, torch_dtype=dtype, trust_remote_code=True).to(device)
-        patcher = comfy.model_patcher.ModelPatcher(model, load_device=device, offload_device=mm.unet_offload_device())
+        processor = florence2_model['processor']
+        patcher = florence2_model['patcher']
         mm.load_model_gpu(patcher)
-        VideoAutoCaption._florence_model = model
-        VideoAutoCaption._florence_processor = processor
-        VideoAutoCaption._florence_patcher = patcher
-        return patcher, processor
-
-    def encode(self, image, prompt, clip, task, model_name="microsoft/Florence-2-large",
-               keep_model_loaded=True, max_new_tokens=128, num_beams=3):
-        patcher, processor = self._load_florence(model_name)
         model = patcher.model
 
         if image.dim() == 4:
@@ -1047,16 +1023,6 @@ class VideoAutoCaption:
         generated_text = processor.batch_decode(generated_ids, skip_special_tokens=False)[0]
         parsed = processor.post_process_generation(generated_text, task=task, image_size=pil_image.size)
         caption = parsed.get(task, "").strip()
-
-        if not keep_model_loaded:
-            try:
-                import comfy.model_management as mm
-                mm.unload_model_gpu(patcher)
-                VideoAutoCaption._florence_model = None
-                VideoAutoCaption._florence_processor = None
-                VideoAutoCaption._florence_patcher = None
-            except Exception:
-                pass
 
         combined = f"{caption}. {prompt.strip()}" if prompt.strip() else caption
         print(f"[VideoAutoCaption] {combined[:120]}{'...' if len(combined) > 120 else ''}", file=sys.stderr)

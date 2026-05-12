@@ -253,6 +253,19 @@ public class VideoConcatenator
         Logs.Info($"[VideoConcat] First video has {firstVideoFrames} frames (param default: {baseFrames}), using as default for sections");
         Logs.Info($"[VideoConcat] Starting continuation loop, _sections.Count={_sections.Count}, _sectionPrompts.Length={_sectionPrompts.Length}");
         
+        // Load Florence 2 model once before the continuation loop
+        JArray florence2Ref = null;
+        if (_enableAutoCaption)
+        {
+            string fl2Node = _generator.CreateNode("Florence2ModelLoader", new JObject()
+            {
+                ["model"] = "Florence-2-large",
+                ["precision"] = "fp16",
+            });
+            florence2Ref = new JArray(fl2Node, 0);
+            Logs.Info($"[VideoConcat] Loaded Florence2ModelLoader: nodeId={fl2Node}");
+        }
+
         for (int i = 1; i < _sections.Count; i++)
         {
             JObject section = _sections[i] as JObject;
@@ -279,7 +292,6 @@ public class VideoConcatenator
                 // Find CLIPTextEncode's clip and LTXVConditioning's positive
                 JArray clipRef = null;
                 string ltxvCondId = null;
-                JArray captionRef = null;
 
                 for (int nid = preId; nid < _generator.LastID; nid++)
                 {
@@ -301,20 +313,19 @@ public class VideoConcatenator
                         ["image"] = lastFrame,
                         ["prompt"] = prompt,
                         ["clip"] = clipRef,
+                        ["florence2_model"] = florence2Ref,
                         ["task"] = "more_detailed_caption",
-                        ["model_name"] = "microsoft/Florence-2-large",
-                        ["keep_model_loaded"] = i < _sections.Count - 1,
                         ["max_new_tokens"] = 128,
                         ["num_beams"] = 3,
                     });
-                    captionRef = new JArray(captionNode, 0);
+                    JArray captionRef = new JArray(captionNode, 0);
 
                     (_generator.Workflow[ltxvCondId]["inputs"] as JObject)["positive"] = captionRef;
-                    Logs.Info($"[VideoConcat] AutoCaption wired: captionNode={captionNode} → ltxvcond={ltxvCondId}, clip from node with text");
+                    Logs.Info($"[VideoConcat] AutoCaption wired: {captionNode} → LTXVConditioning {ltxvCondId}");
                 }
                 else
                 {
-                    Logs.Warning($"[VideoConcat] AutoCaption: clipRef={clipRef != null}, ltxvCondId={ltxvCondId != null}");
+                    Logs.Warning($"[VideoConcat] AutoCaption: clip={clipRef != null} ltxvcond={ltxvCondId != null}");
                 }
 
                 Logs.Info($"[VideoConcat] Section {i} generated with auto-caption: Frames={newVideo.Frames}");
