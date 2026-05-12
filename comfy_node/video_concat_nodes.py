@@ -12,6 +12,7 @@ import struct
 import subprocess
 import tempfile
 import wave
+from PIL import Image
 
 
 __version__ = "2.2.0"
