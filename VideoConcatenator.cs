@@ -265,49 +265,102 @@ public class VideoConcatenator
             double? sectionCfg = baseCfg;
             int sectionSteps = baseSteps;
 
-            Logs.Info($"[VideoConcat] Section {i}: frames={frames}, prompt='{prompt.Substring(0, Math.Min(50, prompt.Length))}...', steps={sectionSteps}, seed={sectionSeed}");
-
-            int preId = _generator.LastID;
-
-            WGNodeData newVideo = GenerateContinuationSection(
-                continuationModel, previousVideo, frames, videoFps ?? 24, sectionSteps, sectionCfg,
-                width, height, widthArr, heightArr, prompt, negPrompt, sectionSeed, i
-            );
-
-            // Diagnostic: log class_type of all nodes created
-            Logs.Debug($"[VideoConcat] --- Nodes created for section {i} (IDs {preId}-{_generator.LastID - 1}) ---");
-            for (int nid = preId; nid < _generator.LastID; nid++)
+            if (_enableAutoCaption)
             {
-                if (_generator.Workflow.TryGetValue(nid.ToString(), out JToken n) && n is JObject obj)
+                JArray lastFrame = ExtractLastSingleFrame(previousVideo.Path);
+
+                int preId = _generator.LastID;
+
+                WGNodeData newVideo = GenerateContinuationSection(
+                    continuationModel, previousVideo, frames, videoFps ?? 24, sectionSteps, sectionCfg,
+                    width, height, widthArr, heightArr, prompt, negPrompt, sectionSeed, i
+                );
+
+                // Find CLIPTextEncode's clip and LTXVConditioning's positive
+                JArray clipRef = null;
+                string ltxvCondId = null;
+                JArray captionRef = null;
+
+                for (int nid = preId; nid < _generator.LastID; nid++)
                 {
-                    string ctype = obj["class_type"]?.ToString() ?? "?";
-                    if (ctype.Contains("Text") || ctype.Contains("Condition") || ctype.Contains("LTXV") || ctype.Contains("Clip"))
+                    string nidStr = nid.ToString();
+                    if (!_generator.Workflow.TryGetValue(nidStr, out JToken tok) || tok is not JObject n)
+                        continue;
+
+                    string ctype = n["class_type"]?.ToString();
+                    if (ctype == "CLIPTextEncode" && n["inputs"] is JObject cinp && cinp.TryGetValue("clip", out JToken c))
+                        clipRef = c as JArray;
+                    if (ctype == "LTXVConditioning" && n["inputs"] is JObject linp && linp.TryGetValue("positive", out JToken _))
+                        ltxvCondId = nidStr;
+                }
+
+                if (clipRef != null && ltxvCondId != null)
+                {
+                    string captionNode = _generator.CreateNode("VideoAutoCaption", new JObject()
                     {
-                        Logs.Debug($"[VideoConcat]   Node {nid}: {ctype}");
+                        ["image"] = lastFrame,
+                        ["prompt"] = prompt,
+                        ["clip"] = clipRef,
+                        ["task"] = "more_detailed_caption",
+                        ["model_name"] = "microsoft/Florence-2-large",
+                        ["keep_model_loaded"] = i < _sections.Count - 1,
+                        ["max_new_tokens"] = 128,
+                        ["num_beams"] = 3,
+                    });
+                    captionRef = new JArray(captionNode, 0);
+
+                    (_generator.Workflow[ltxvCondId]["inputs"] as JObject)["positive"] = captionRef;
+                    Logs.Info($"[VideoConcat] AutoCaption wired: captionNode={captionNode} → ltxvcond={ltxvCondId}, clip from node with text");
+                }
+                else
+                {
+                    Logs.Warning($"[VideoConcat] AutoCaption: clipRef={clipRef != null}, ltxvCondId={ltxvCondId != null}");
+                }
+
+                Logs.Info($"[VideoConcat] Section {i} generated with auto-caption: Frames={newVideo.Frames}");
+                videoChunks.Add(newVideo);
+                
+                if (newVideo.AttachedAudio != null)
+                {
+                    WGNodeData currentAudioVae = _generator.CurrentAudioVae ?? audioVae;
+                    WGNodeData sectionAudio = newVideo.AttachedAudio;
+                    if (sectionAudio.DataType == WGNodeData.DT_LATENT_AUDIO && currentAudioVae != null)
+                        sectionAudio = sectionAudio.DecodeLatents(currentAudioVae, true);
+                    if (sectionAudio != null && sectionAudio.DataType == WGNodeData.DT_AUDIO)
+                        audioChunks.Add(sectionAudio.Path);
+                }
+                
+                previousVideo = newVideo;
+            }
+            else
+            {
+                Logs.Info($"[VideoConcat] Section {i}: frames={frames}, prompt='{prompt.Substring(0, Math.Min(50, prompt.Length))}...', steps={sectionSteps}, seed={sectionSeed}");
+
+                WGNodeData newVideo = GenerateContinuationSection(
+                    continuationModel, previousVideo, frames, videoFps ?? 24, sectionSteps, sectionCfg,
+                    width, height, widthArr, heightArr, prompt, negPrompt, sectionSeed, i
+                );
+
+                Logs.Info($"[VideoConcat] Section {i} generated: Frames={newVideo.Frames}, DataType={newVideo.DataType}");
+                
+                videoChunks.Add(newVideo);
+                
+                if (newVideo.AttachedAudio != null)
+                {
+                    WGNodeData currentAudioVae = _generator.CurrentAudioVae ?? audioVae;
+                    WGNodeData sectionAudio = newVideo.AttachedAudio;
+                    if (sectionAudio.DataType == WGNodeData.DT_LATENT_AUDIO && currentAudioVae != null)
+                    {
+                        sectionAudio = sectionAudio.DecodeLatents(currentAudioVae, true);
+                    }
+                    if (sectionAudio != null && sectionAudio.DataType == WGNodeData.DT_AUDIO)
+                    {
+                        audioChunks.Add(sectionAudio.Path);
                     }
                 }
+                
+                previousVideo = newVideo;
             }
-            Logs.Debug($"[VideoConcat] --- End ---");
-
-            Logs.Info($"[VideoConcat] Section {i} generated: Frames={newVideo.Frames}, DataType={newVideo.DataType}");
-            
-            videoChunks.Add(newVideo);
-            
-            if (newVideo.AttachedAudio != null)
-            {
-                WGNodeData currentAudioVae = _generator.CurrentAudioVae ?? audioVae;
-                WGNodeData sectionAudio = newVideo.AttachedAudio;
-                if (sectionAudio.DataType == WGNodeData.DT_LATENT_AUDIO && currentAudioVae != null)
-                {
-                    sectionAudio = sectionAudio.DecodeLatents(currentAudioVae, true);
-                }
-                if (sectionAudio != null && sectionAudio.DataType == WGNodeData.DT_AUDIO)
-                {
-                    audioChunks.Add(sectionAudio.Path);
-                }
-            }
-            
-            previousVideo = newVideo;
         }
 
         if (_enableColorMatch && videoChunks.Count > 1)
@@ -599,6 +652,29 @@ public class VideoConcatenator
             ["image"] = video,
             ["batch_index"] = new JArray(startIndexNode, 0),
             ["length"] = frameCount
+        });
+
+        return [extractNode, 0];
+    }
+
+    private JArray ExtractLastSingleFrame(JArray video)
+    {
+        string frameCountNode = _generator.CreateNode("SwarmCountFrames", new JObject()
+        {
+            ["image"] = video
+        });
+
+        string lastIndexNode = _generator.CreateNode("SwarmIntAdd", new JObject()
+        {
+            ["a"] = new JArray(frameCountNode, 0),
+            ["b"] = -1
+        });
+
+        string extractNode = _generator.CreateNode("ImageFromBatch", new JObject()
+        {
+            ["image"] = video,
+            ["batch_index"] = new JArray(lastIndexNode, 0),
+            ["length"] = 1
         });
 
         return [extractNode, 0];

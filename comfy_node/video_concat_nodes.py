@@ -962,8 +962,8 @@ class VideoCacheCleanup:
 
 class VideoAutoCaption:
     """
-    Captions an image using Florence 2 and concatenates the caption
-    with a user prompt, returning the combined string.
+    Captions an image using Florence 2, concatenates with the user prompt,
+    encodes with CLIP, and returns conditioning. Replaces CLIPTextEncode.
     """
 
     _florence_model = None
@@ -976,6 +976,7 @@ class VideoAutoCaption:
             "required": {
                 "image": ("IMAGE",),
                 "prompt": ("STRING", {"default": "", "multiline": True}),
+                "clip": ("CLIP",),
                 "task": (
                     ["more_detailed_caption", "detailed_caption", "caption",
                      "prompt_gen_mixed_caption", "prompt_gen_mixed_caption_plus"],
@@ -990,11 +991,11 @@ class VideoAutoCaption:
             }
         }
 
-    RETURN_TYPES = ("STRING",)
-    RETURN_NAMES = ("combined_prompt",)
-    FUNCTION = "caption_and_concat"
+    RETURN_TYPES = ("CONDITIONING",)
+    RETURN_NAMES = ("positive",)
+    FUNCTION = "encode"
     CATEGORY = "SwarmUI/video"
-    DESCRIPTION = "Describe an image with Florence 2 and concatenate with the user prompt."
+    DESCRIPTION = "Caption an image with Florence 2, concatenate with prompt, encode with CLIP, return conditioning."
 
     @staticmethod
     def _load_florence(model_name):
@@ -1016,8 +1017,8 @@ class VideoAutoCaption:
         VideoAutoCaption._florence_patcher = patcher
         return patcher, processor
 
-    def caption_and_concat(self, image, prompt, task, model_name="microsoft/Florence-2-large",
-                           keep_model_loaded=True, max_new_tokens=128, num_beams=3):
+    def encode(self, image, prompt, clip, task, model_name="microsoft/Florence-2-large",
+               keep_model_loaded=True, max_new_tokens=128, num_beams=3):
         patcher, processor = self._load_florence(model_name)
         model = patcher.model
 
@@ -1056,7 +1057,10 @@ class VideoAutoCaption:
 
         combined = f"{caption}. {prompt.strip()}" if prompt.strip() else caption
         print(f"[VideoAutoCaption] {combined[:120]}{'...' if len(combined) > 120 else ''}", file=sys.stderr)
-        return (combined,)
+
+        import nodes
+        pos = nodes.CLIPTextEncode().encode(clip, combined)[0]
+        return (pos,)
 
 
 # Node mappings for ComfyUI
