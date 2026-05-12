@@ -1029,7 +1029,7 @@ class VideoAutoCaption:
         caption = caption.replace('</s>', '').replace('<s>', '').replace('</s>', '').strip()
 
         combined = f"{caption}. {prompt.strip()}" if prompt.strip() else caption
-        print(f"[VideoAutoCaption] {combined[:120]}{'...' if len(combined) > 120 else ''}", file=sys.stderr)
+        print(f"[VideoAutoCaption] {combined[:500]}{'...' if len(combined) > 500 else ''}", file=sys.stderr)
 
         import nodes
         pos = nodes.CLIPTextEncode().encode(clip, combined)[0]
