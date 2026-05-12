@@ -1003,10 +1003,6 @@ class VideoAutoCaption:
         mm.load_model_gpu(patcher)
         model = patcher.model
 
-        if image.dim() == 4:
-            image = image[0]
-        pil_image = Image.fromarray((image.cpu().numpy() * 255).clip(0, 255).astype(np.uint8))
-
         task_map = {
             "caption": "<CAPTION>",
             "detailed_caption": "<DETAILED_CAPTION>",
@@ -1015,7 +1011,13 @@ class VideoAutoCaption:
             "prompt_gen_mixed_caption_plus": "<MIXED_CAPTION_PLUS>",
         }
         task_token = task_map.get(task, "<MORE_DETAILED_CAPTION>")
-        inputs = processor(text=task_token, images=pil_image)
+
+        image_tensor = image
+        if image_tensor.dim() == 4:
+            image_tensor = image_tensor[0]
+        image_tensor = image_tensor.permute(2, 0, 1)
+
+        inputs = processor(text=task_token, images=image_tensor.unsqueeze(0))
 
         with torch.no_grad():
             generated_ids = model.generate(
@@ -1023,9 +1025,8 @@ class VideoAutoCaption:
                 pixel_values=inputs["pixel_values"].to(dtype=dtype, device=patcher.load_device),
                 max_new_tokens=max_new_tokens, num_beams=num_beams, do_sample=num_beams == 1,
             )
-        generated_text = processor.batch_decode(generated_ids, skip_special_tokens=False)[0]
-        parsed = processor.post_process_generation(generated_text, task=task, image_size=pil_image.size)
-        caption = parsed.get(task, "").strip()
+        caption = processor.batch_decode(generated_ids, skip_special_tokens=False)[0]
+        caption = caption.replace('</s>', '').replace('<s>', '').replace('</s>', '').strip()
 
         combined = f"{caption}. {prompt.strip()}" if prompt.strip() else caption
         print(f"[VideoAutoCaption] {combined[:120]}{'...' if len(combined) > 120 else ''}", file=sys.stderr)
