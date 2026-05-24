@@ -15,7 +15,7 @@ import wave
 from PIL import Image
 
 
-__version__ = "2.2.0"
+__version__ = "2.2.1"
 
 
 def _get_ffmpeg_path():
@@ -31,8 +31,14 @@ def _get_ffmpeg_path():
     return "ffmpeg"
 
 
+_nvenc_available = None
+
+
 def _check_nvenc_available(ffmpeg_path=None):
-    """Check if NVENC encoding is available in the ffmpeg binary."""
+    """Check if NVENC encoding is available in the ffmpeg binary. Result is cached."""
+    global _nvenc_available
+    if _nvenc_available is not None:
+        return _nvenc_available
     for path in [ffmpeg_path or _get_ffmpeg_path(), "ffmpeg"]:
         if not path:
             continue
@@ -41,9 +47,11 @@ def _check_nvenc_available(ffmpeg_path=None):
                 [path, "-encoders"], capture_output=True, text=True, timeout=10
             )
             if "h264_nvenc" in result.stdout:
+                _nvenc_available = True
                 return True
         except Exception:
             continue
+    _nvenc_available = False
     return False
 
 
@@ -169,24 +177,22 @@ class VideoTemporalBlend:
         result = video.clone()
 
         if mode == "transition_only":
-            for i in range(1, min(blend_frames, frames)):
-                factor = blend_strength * (1 - i / blend_frames)
-                result[i] = result[i] * (1 - factor * 0.5) + result[i - 1] * (
-                    factor * 0.5
-                )
+            n = min(blend_frames, frames)
+            if n > 1:
+                indices = torch.arange(1, n, device=video.device, dtype=torch.float32)
+                factors = blend_strength * (1.0 - indices / blend_frames) * 0.5
+                weight = factors.view(-1, 1, 1, 1)
+                result[1:n] = result[1:n] * (1 - weight) + result[:n-1] * weight
 
-            for i in range(max(1, frames - blend_frames), frames):
-                factor = blend_strength * (i - (frames - blend_frames)) / blend_frames
-                if i < frames - 1:
-                    result[i] = result[i] * (1 - factor * 0.5) + result[i + 1] * (
-                        factor * 0.5
-                    )
+            start = max(1, frames - blend_frames)
+            if start < frames - 1:
+                indices = torch.arange(start, frames - 1, device=video.device, dtype=torch.float32)
+                factors = blend_strength * (indices - (frames - blend_frames)) / blend_frames * 0.5
+                weight = factors.view(-1, 1, 1, 1)
+                result[start:frames-1] = result[start:frames-1] * (1 - weight) + result[start+1:frames] * weight
         else:
-            for i in range(1, frames):
-                factor = blend_strength * min(1.0, blend_frames / max(1, frames))
-                result[i] = result[i] * (1 - factor * 0.5) + result[i - 1] * (
-                    factor * 0.5
-                )
+            factor = blend_strength * min(1.0, blend_frames / max(1, frames)) * 0.5
+            result[1:] = result[1:] * (1 - factor) + result[:-1] * factor
 
         return (result,)
 
@@ -260,10 +266,16 @@ class VideoCrossFadeTransition:
                 elif blend_mode == "fade_to_black":
                     if t < 0.5:
                         result[idx_out] = video_a[idx_a] * (1 - t * 2)
+                    else:
+                        result[idx_out] = video_b[i] * ((t - 0.5) * 2)
                 elif blend_mode == "fade_to_white":
                     white = torch.ones_like(video_a[idx_a])
                     if t < 0.5:
                         result[idx_out] = video_a[idx_a] * (1 - t * 2) + white * (t * 2)
+                    else:
+                        result[idx_out] = white * (
+                            1 - (t - 0.5) * 2
+                        ) + video_b[i] * ((t - 0.5) * 2)
                 elif blend_mode == "dissolve":
                     mask = torch.rand((h, w, c)) < t
                     result[idx_out] = torch.where(mask, video_b[i], video_a[idx_a])
@@ -440,56 +452,45 @@ class AudioCrossFade:
 
         num_channels_a = waveform_a.shape[0]
         num_channels_b = waveform_b.shape[0]
-
-        if num_channels_a > 1:
-            waveform_a_mono = waveform_a.mean(dim=0, keepdim=True)
-        else:
-            waveform_a_mono = waveform_a
-
-        if num_channels_b > 1:
-            waveform_b_mono = waveform_b.mean(dim=0, keepdim=True)
-        else:
-            waveform_b_mono = waveform_b
-
         output_channels = max(num_channels_a, num_channels_b)
+
+        if num_channels_a < output_channels:
+            waveform_a = waveform_a.repeat(output_channels // num_channels_a, 1)
+        if num_channels_b < output_channels:
+            waveform_b = waveform_b.repeat(output_channels // num_channels_b, 1)
 
         non_overlap_a = samples_a - crossfade
         total_samples = samples_a + samples_b - crossfade
 
-        result_mono = torch.zeros(
-            (1, total_samples),
-            dtype=waveform_a_mono.dtype,
-            device=waveform_a_mono.device,
+        result = torch.zeros(
+            (output_channels, total_samples),
+            dtype=waveform_a.dtype,
+            device=waveform_a.device,
         )
 
-        result_mono[0, :non_overlap_a] = waveform_a_mono[0, :non_overlap_a]
+        result[:, :non_overlap_a] = waveform_a[:, :non_overlap_a]
 
         fade_out = torch.linspace(
             1.0,
             0.0,
             crossfade,
-            dtype=waveform_a_mono.dtype,
-            device=waveform_a_mono.device,
+            dtype=waveform_a.dtype,
+            device=waveform_a.device,
         )
         fade_in = torch.linspace(
             0.0,
             1.0,
             crossfade,
-            dtype=waveform_b_mono.dtype,
-            device=waveform_b_mono.device,
+            dtype=waveform_b.dtype,
+            device=waveform_b.device,
         )
 
-        result_mono[0, non_overlap_a:samples_a] = (
-            waveform_a_mono[0, non_overlap_a:] * fade_out
-            + waveform_b_mono[0, :crossfade] * fade_in
+        result[:, non_overlap_a:samples_a] = (
+            waveform_a[:, non_overlap_a:] * fade_out.unsqueeze(0)
+            + waveform_b[:, :crossfade] * fade_in.unsqueeze(0)
         )
 
-        result_mono[0, samples_a:] = waveform_b_mono[0, crossfade:]
-
-        if output_channels > 1:
-            result = result_mono.repeat(output_channels, 1)
-        else:
-            result = result_mono
+        result[:, samples_a:] = waveform_b[:, crossfade:]
 
         if isinstance(audio_a, dict):
             return ({"waveform": result, "sample_rate": sample_rate},)
@@ -1029,7 +1030,7 @@ class VideoAutoCaption:
         caption = caption.replace('</s>', '').replace('<s>', '').replace('</s>', '').strip()
 
         combined = f"{caption}. {prompt.strip()}" if prompt.strip() else caption
-        print(f"[VideoAutoCaption] {combined[:500]}{'...' if len(combined) > 500 else ''}", file=sys.stderr)
+        print(f"[VideoAutoCaption] {combined}", file=sys.stderr)
 
         import nodes
         pos = nodes.CLIPTextEncode().encode(clip, combined)[0]

@@ -10,6 +10,42 @@ namespace VideoConcat;
 
 public class VideoConcatenator
 {
+    public record ContinuationModelInfo(T2IModel ContinuationModel, bool IsText2Video);
+
+    public static ContinuationModelInfo ResolveContinuationModel(T2IParamInput userInput, T2IRegisteredParam<T2IModel> extensionModelParam)
+    {
+        T2IModel mainModel = userInput.Get(T2IParamTypes.Model, null);
+        T2IModel videoModel = userInput.Get(T2IParamTypes.VideoModel, null);
+        T2IModel extensionModel = userInput.Get(extensionModelParam, null);
+
+        bool isText2Video = videoModel == null
+            && mainModel != null
+            && mainModel.ModelClass?.CompatClass?.IsText2Video == true;
+
+        T2IModel continuationModel = extensionModel ?? videoModel;
+
+        if (continuationModel == null)
+        {
+            if (isText2Video)
+            {
+                throw new SwarmUserErrorException(
+                    "Video Concatenation with Text2Video models requires an 'Extension Model' " +
+                    "(any video model that supports Image2Video: LTXV, Wan I2V, SVD, Hunyuan I2V, Cosmos I2V, etc.).\n" +
+                    "Please select an Extension Model in the Video Concatenation group."
+                );
+            }
+            else
+            {
+                throw new SwarmUserErrorException(
+                    "Video concatenation requires a Video Model selected in 'Image To Video', " +
+                    "or an 'Extension Model' in the Video Concatenation group."
+                );
+            }
+        }
+
+        return new ContinuationModelInfo(continuationModel, isText2Video);
+    }
+
     private readonly WorkflowGenerator _generator;
     private JArray _sections;
     private string[] _sectionPrompts;
@@ -102,40 +138,15 @@ public class VideoConcatenator
             return;
         }
 
-        // Detect if we have a Text2Video model as the main model
-        // Text2Video: Model is set and is Text2Video, VideoModel is null
-        // Image2Video: VideoModel is set, Model can be anything
-        T2IModel videoModel = _generator.UserInput.Get(T2IParamTypes.VideoModel, null);
+        ContinuationModelInfo modelInfo = ResolveContinuationModel(_generator.UserInput, VideoConcatExtension.VideoConcatExtensionModel);
+        T2IModel continuationModel = modelInfo.ContinuationModel;
+        bool isText2Video = modelInfo.IsText2Video;
+
         T2IModel mainModel = _generator.UserInput.Get(T2IParamTypes.Model, null);
-        bool isText2Video = videoModel == null 
-            && mainModel != null 
-            && mainModel.ModelClass?.CompatClass?.IsText2Video == true;
-        
+        T2IModel videoModel = _generator.UserInput.Get(T2IParamTypes.VideoModel, null);
         T2IModel extensionModel = _generator.UserInput.Get(VideoConcatExtension.VideoConcatExtensionModel, null);
         
         Logs.Info($"[VideoConcat] isText2Video={isText2Video}, mainModel={mainModel?.Name ?? "null"}, videoModel={videoModel?.Name ?? "null"}, extensionModel={extensionModel?.Name ?? "null"}");
-        
-        // For continuations, use Extension Model first, then VideoModel
-        T2IModel continuationModel = extensionModel ?? videoModel;
-        
-        if (continuationModel == null)
-        {
-            if (isText2Video)
-            {
-                throw new SwarmUserErrorException(
-                    "Video Concatenation with Text2Video models requires an 'Extension Model' " +
-                    "(any video model that supports Image2Video: LTXV, Wan I2V, SVD, Hunyuan I2V, Cosmos I2V, etc.).\n" +
-                    "Please select an Extension Model in the Video Concatenation group."
-                );
-            }
-            else
-            {
-                throw new SwarmUserErrorException(
-                    "Video concatenation requires a Video Model selected in 'Image To Video', " +
-                    "or an 'Extension Model' in the Video Concatenation group."
-                );
-            }
-        }
         
         if (isText2Video)
         {
@@ -245,7 +256,7 @@ public class VideoConcatenator
             }
         }
         
-        int? videoFps = baseFps ?? currentMedia.FPS;
+        int? videoFps = baseFps ?? (int?)currentMedia.FPS;
 
         // Use the actual frame count of the first video as the default for continuations
         // This ensures all sections match the duration of video 1 even if the parameter differs
@@ -551,9 +562,11 @@ public class VideoConcatenator
             ContextID = T2IParamInput.SectionID_Video
         };
 
-        // For LTXV models, use LTXVTiledVAEDecode instead of standard VAEDecode/VAEDecodeTiled
+        // For LTXV1 models only, replace the standard VAE decode node with LTXVTiledVAEDecode.
+        // LTXV2 already uses VAEDecodeTiled via SwarmUI's built-in DecodeLatents (IsLTXV2()),
+        // so we must NOT replace it — doing so causes black output with corrupted timestamps.
         string compatClass = videoModel?.ModelClass?.CompatClass?.ID ?? "";
-        bool isLTXV = compatClass.Contains("ltx-video");
+        bool isLTXV1 = compatClass == "lightricks-ltx-video";
 
         try
         {
@@ -561,32 +574,24 @@ public class VideoConcatenator
         }
         finally
         {
-            // Ensure any temp handlers are removed
         }
 
         WGNodeData result = _generator.CurrentMedia;
 
-        // For LTXV: replace the standard VAE decode node with LTXVTiledVAEDecode.
-        // CreateImageToVideo already decoded to DT_VIDEO, so we find the latent that
-        // was fed to the decode node and create our own decoder from it.
-        Logs.Info($"[VideoConcat] LTXV check: compatClass={compatClass}, isLTXV={isLTXV}, result.DataType={result.DataType}, genInfo.Vae.Path={genInfo.Vae?.Path?.ToString() ?? "null"}");
-
-        if (isLTXV && result.DataType == WGNodeData.DT_VIDEO && genInfo.Vae != null)
+        if (isLTXV1 && result.DataType == WGNodeData.DT_VIDEO && genInfo.Vae != null)
         {
             string decodeNodeId = result.Path[0]?.ToString();
-            Logs.Info($"[VideoConcat] Attempting VAE decode replacement: decodeNodeId={decodeNodeId}");
 
             if (!string.IsNullOrEmpty(decodeNodeId))
             {
                 JObject decodeNode = _generator.Workflow[decodeNodeId] as JObject;
-                Logs.Info($"[VideoConcat] decodeNode found: {decodeNode != null}");
 
                 if (decodeNode != null)
                 {
+                    string nodeType = decodeNode["class_type"]?.ToString() ?? "";
                     JToken samplesInput = decodeNode["inputs"]?["samples"] ?? decodeNode["inputs"]?["latent"];
-                    Logs.Info($"[VideoConcat] samplesInput found: {samplesInput != null}, type={decodeNode["inputs"]?.ToString()}");
 
-                    if (samplesInput != null)
+                    if (samplesInput != null && nodeType != "VAEDecodeTiled")
                     {
                         string decodeNodeId2 = _generator.CreateNode("LTXVTiledVAEDecode", new JObject()
                         {
@@ -601,19 +606,19 @@ public class VideoConcatenator
                         _generator.CurrentMedia = result;
                         Logs.Info($"[VideoConcat] Section {sectionIndex}: replaced VAE decode with LTXVTiledVAEDecode (nodeId={decodeNodeId2})");
                     }
+                    else if (nodeType == "VAEDecodeTiled")
+                    {
+                        Logs.Info($"[VideoConcat] Section {sectionIndex}: SwarmUI already uses VAEDecodeTiled, keeping it (nodeId={decodeNodeId})");
+                    }
                     else
                     {
-                        Logs.Warning("[VideoConcat] Could not find samples/latents input in decode node");
+                        Logs.Warning($"[VideoConcat] Could not find samples/latents input in decode node (type={nodeType})");
                     }
                 }
                 else
                 {
                     Logs.Warning($"[VideoConcat] Decode node '{decodeNodeId}' not found in Workflow");
                 }
-            }
-            else
-            {
-                Logs.Warning("[VideoConcat] decodeNodeId is null or empty");
             }
         }
 

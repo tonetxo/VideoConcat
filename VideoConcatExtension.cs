@@ -301,35 +301,8 @@ public class VideoConcatExtension : Extension
                 throw new SwarmUserErrorException("Video concatenation requires video feature support");
             }
 
-            // Check for Text2Video mode (main model is video, no VideoModel selected)
-            T2IModel mainModel = g.UserInput.Get(T2IParamTypes.Model, null);
-            T2IModel videoModel = g.UserInput.Get(T2IParamTypes.VideoModel, null);
-            T2IModel extensionModel = g.UserInput.Get(VideoConcatExtensionModel, null);
-            
-            bool isText2Video = videoModel == null 
-                && mainModel != null 
-                && mainModel.ModelClass?.CompatClass?.IsText2Video == true;
-            
-            // Determine the model to use for continuations
-            T2IModel continuationModel = extensionModel ?? videoModel;
-            
-            if (continuationModel == null)
-            {
-                if (isText2Video)
-                {
-                    throw new SwarmUserErrorException(
-                        "Video Concatenation with Text2Video requires an 'Extension Model' " +
-                        "in the Video Concatenation group. Please select a video model there."
-                    );
-                }
-                else
-                {
-                    throw new SwarmUserErrorException(
-                        "Video concatenation requires a Video Model selected in 'Image To Video', " +
-                        "or an 'Extension Model' in the Video Concatenation group."
-                    );
-                }
-            }
+            VideoConcatenator.ContinuationModelInfo modelInfo = VideoConcatenator.ResolveContinuationModel(g.UserInput, VideoConcatExtensionModel);
+            T2IModel continuationModel = modelInfo.ContinuationModel;
 
             string durationsRaw = g.UserInput.Get(VideoConcatSectionDurations, "") ?? "";
             // If no durations specified, don't set them - let VideoConcatenator read from the actual video

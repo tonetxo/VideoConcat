@@ -1,1 +1,6 @@
 __pycache__/
+*.pyc
+bin/
+obj/
+.ruff_cache/
+.qwen/
