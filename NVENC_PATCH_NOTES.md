@@ -22,6 +22,7 @@ This document tracks the local modifications made to enable NVIDIA NVENC hardwar
 - Added NVENC encoder args (`h264_nvenc` / `hevc_nvenc` with `-preset p4`)
 - **Replaced `subprocess.run(input=raw_images.tobytes())` with `subprocess.Popen` streaming frame-by-frame** — the old approach transferred all frames GPU→CPU in a single `.tobytes()` call (up to **294s** with large models like LTXAV). Streaming each frame individually avoids the peak CPU/RAM bottleneck and lets ffmpeg encode concurrently.
 - Width/height extracted from `images[0]` only (not full batch) to avoid unnecessary transfer
+- **Added `-movflags +faststart` to all MP4 formats** — moves the `moov atom` to the start of the file so browsers can begin playback before the full download. Without this, the generated MP4 has the `moov` at the end, which Firefox refuses to play in the HTML5 `<video>` element (shows "no compatible video format or MIME type"). Applies to: `h264-mp4`, `h265-mp4`, `h264_nvenc-mp4`, `h265_nvenc-mp4`.
 
 ## Audio support
 
@@ -137,6 +138,7 @@ If the upstream changes are minor (e.g. they added one new format string to `vid
 | SwarmSaveAnimationWS shows nvenc formats? | Check node dropdown in ComfyUI workflow |
 | NVENC encode fast? | <1s ffmpeg encode; frame-by-frame GPU→CPU transfer depends on model VRAM pressure |
 | Audio included in mp4? | Play output file, verify audio track present |
+| Fullscreen video works in browser? | Click magnifying glass on video in History — should play, not show MIME error |
 | Skip-worktree still active? | `git ls-files -v` → both files should have `S` prefix |
 
 ## Troubleshooting
@@ -166,6 +168,12 @@ skip-worktree does not protect against this when branches have diverged. Use the
 - Verify no broken extensions in `src/Extensions/` — remove or disable any that fail to load
 - Check scheduler: AlignYourSteps is not compatible with LTXAV, use `euler` or `dpmpp_2m`
 
+### Fullscreen viewer in History/Media Assets shows "no compatible video format or MIME type"
+- The `moov atom` in the MP4 is at the end instead of the beginning. Browsers (Firefox especially) require the `moov` to be at the start.
+- Verify the fix is present: `grep -n "movflags" SwarmSaveAnimationWS.py` should show 4 lines (one per MP4 format)
+- Re-encode a test video and verify: `ffprobe -v quiet -show_format archivo.mp4 | grep -i "major_brand\|moov"`
+- If the fix is missing, copy the 4 lines from this file's "What Was Changed" section and restart SwarmUI
+
 ## Files modified in this patch
 
 | File | Repo | Protection | Commit |
@@ -173,3 +181,4 @@ skip-worktree does not protect against this when branches have diverged. Use the
 | `comfy_node/video_concat_nodes.py` | `VideoConcat` extension | None (separate repo) | `c3b7c3d` |
 | `src/Text2Image/T2IParamTypes.cs` | SwarmUI core | `--skip-worktree` | Uncommitted local |
 | `src/BuiltinExtensions/ComfyUIBackend/ExtraNodes/SwarmComfyExtra/SwarmSaveAnimationWS.py` | SwarmUI core | `--skip-worktree` | Uncommitted local |
+| `src/BuiltinExtensions/ComfyUIBackend/ComfyUIRedirectHelper.cs` | SwarmUI core | `--skip-worktree` | Uncommitted local |

@@ -998,11 +998,29 @@ class VideoAutoCaption:
     def encode(self, image, prompt, clip, florence2_model, task,
                max_new_tokens=128, num_beams=3):
         import comfy.model_management as mm
+        import gc
         processor = florence2_model['processor']
         patcher = florence2_model['patcher']
         dtype = florence2_model.get('dtype', torch.float16)
-        mm.load_model_gpu(patcher)
-        model = patcher.model
+
+        # Offload all other models to free VRAM before loading Florence2
+        # This avoids OOM when LTXV or other large models are resident in GPU
+        mm.unload_all_models()
+        mm.soft_empty_cache()
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+        # Decide device: use CUDA only if enough free VRAM (>3GB), else CPU
+        run_device = "cpu"
+        if torch.cuda.is_available():
+            free_vram = torch.cuda.mem_get_info()[0] / 1024**3
+            print(f"[VideoAutoCaption] Free VRAM after offload: {free_vram:.1f}GB", file=sys.stderr)
+            if free_vram > 3.0:
+                run_device = str(patcher.load_device)
+
+        print(f"[VideoAutoCaption] Running Florence2 on: {run_device}", file=sys.stderr)
+        model = patcher.model.to(run_device)
 
         task_map = {
             "caption": "<CAPTION>",
@@ -1020,12 +1038,19 @@ class VideoAutoCaption:
 
         inputs = processor(text=task_token, images=image_tensor.unsqueeze(0))
 
+        run_dtype = dtype if run_device != "cpu" else torch.float32
         with torch.no_grad():
             generated_ids = model.generate(
-                input_ids=inputs["input_ids"].to(patcher.load_device),
-                pixel_values=inputs["pixel_values"].to(dtype=dtype, device=patcher.load_device),
+                input_ids=inputs["input_ids"].to(run_device),
+                pixel_values=inputs["pixel_values"].to(dtype=run_dtype, device=run_device),
                 max_new_tokens=max_new_tokens, num_beams=num_beams, do_sample=num_beams == 1,
             )
+
+        # Move model back to CPU after inference to free VRAM
+        patcher.model.to("cpu")
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
         caption = processor.batch_decode(generated_ids, skip_special_tokens=False)[0]
         caption = caption.replace('</s>', '').replace('<s>', '').replace('</s>', '').strip()
 
