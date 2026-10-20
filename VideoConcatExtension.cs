@@ -98,8 +98,8 @@ public class VideoConcatExtension : Extension
             Name: "Section Durations",
             Description: "Duration in frames for each video section (including the first), separated by commas.\n" +
                          "Example: '25,30,25' for 3 sections.\n" +
-                         "If empty, uses default Video Frames for all sections.\n" +
-                         "If fewer durations than sections, remaining use default Video Frames.",
+                         "If empty, every section uses the frame count of the first generated video.\n" +
+                         "If fewer durations than sections, the remaining sections use the first video's frame count.",
             Default: "",
             Group: VideoConcatGroup,
             OrderPriority: priority++,
@@ -257,16 +257,14 @@ public class VideoConcatExtension : Extension
 
         VideoConcatEnableFastSave = T2IParamTypes.Register<bool>(new T2IParamType(
             Name: "Enable Fast Save",
-            Description: "Use GPU-accelerated video encoding (NVENC) for faster output.\n" +
-                         "Automatically detects NVIDIA NVENC support and uses it when available.\n" +
-                         "Falls back to optimized CPU encoding if NVENC is not available.\n" +
-                         "Highly recommended when RTX Upscale is enabled (4x pixel increase).\n" +
-                         "Uses 'balanced' quality preset for good speed/quality tradeoff.",
+            Description: "Deprecated, has no effect: the concatenated video is saved by SwarmUI's normal video save (honoring 'Video Format').\n" +
+                         "Kept registered (hidden) only so older presets and metadata still load.",
             Default: "true",
             Group: VideoConcatGroup,
             OrderPriority: priority++,
             FeatureFlag: "video",
-            DoNotPreview: true
+            DoNotPreview: true,
+            VisibleNormally: false
         ));
 
         VideoConcatEnableAutoCaption = T2IParamTypes.Register<bool>(new T2IParamType(
@@ -305,21 +303,10 @@ public class VideoConcatExtension : Extension
             T2IModel continuationModel = modelInfo.ContinuationModel;
 
             string durationsRaw = g.UserInput.Get(VideoConcatSectionDurations, "") ?? "";
-            // If no durations specified, don't set them - let VideoConcatenator read from the actual video
             int[] durations = ParseDurations(durationsRaw);
 
+            // One section per video: the first (already generated) plus one per section prompt.
             int totalSections = sectionPrompts.Length + 1;
-
-            if (durations.Length == 0)
-            {
-                // Don't fill in defaults here - let VideoConcatenator use the actual generated video's frame count
-                durations = [];
-            }
-            else if (durations.Length < totalSections)
-            {
-                // Partial durations provided - still let VideoConcatenator fill the rest from actual video
-                // We'll pass what we have and let it handle the rest
-            }
 
             int transitionFrames = g.UserInput.Get(VideoConcatTransitionFrames, 12);
             string transitionMode = g.UserInput.Get(VideoConcatTransitionMode, "crossfade");
@@ -331,15 +318,21 @@ public class VideoConcatExtension : Extension
             bool enableAudioCrossfade = g.UserInput.Get(VideoConcatEnableAudioFade, true);
             int audioCrossfadeFrames = g.UserInput.Get(VideoConcatAudioCrossfadeFrames, 8);
             bool enableRTXUpscale = g.UserInput.Get(VideoConcatEnableRTXUpscale, false);
-            bool enableFastSave = g.UserInput.Get(VideoConcatEnableFastSave, true);
             bool enableAutoCaption = g.UserInput.Get(VideoConcatEnableAutoCaption, false);
 
             try
             {
-                JArray sections = new JArray();
-                foreach (int duration in durations)
+                // Sections are driven by the prompts, not by the durations: a section without a duration
+                // leaves 'duration_frames' unset, so VideoConcatenator uses the first video's actual frame count.
+                JArray sections = [];
+                for (int i = 0; i < totalSections; i++)
                 {
-                    sections.Add(new JObject { ["duration_frames"] = duration });
+                    JObject section = [];
+                    if (i < durations.Length)
+                    {
+                        section["duration_frames"] = durations[i];
+                    }
+                    sections.Add(section);
                 }
 
                 new VideoConcatenator(g)
@@ -351,7 +344,6 @@ public class VideoConcatExtension : Extension
                     .SetTemporalBlending(enableTemporalBlend, temporalStrength)
                     .SetAudioCrossfade(enableAudioCrossfade, audioCrossfadeFrames)
                     .SetRTXUpscale(enableRTXUpscale)
-                    .SetFastSave(enableFastSave)
                     .SetAutoCaption(enableAutoCaption)
                     .Concatenate();
             }

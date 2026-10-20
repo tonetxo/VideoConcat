@@ -59,7 +59,6 @@ public class VideoConcatenator
     private bool _enableAudioCrossfade = true;
     private int _audioCrossfadeFrames = 8;
     private bool _enableRTXUpscale = false;
-    private bool _enableFastSave = true;
     private bool _enableAutoCaption = false;
 
     public VideoConcatenator(WorkflowGenerator generator)
@@ -119,12 +118,6 @@ public class VideoConcatenator
         return this;
     }
 
-    public VideoConcatenator SetFastSave(bool enabled)
-    {
-        _enableFastSave = enabled;
-        return this;
-    }
-
     public VideoConcatenator SetAutoCaption(bool enabled)
     {
         _enableAutoCaption = enabled;
@@ -171,9 +164,6 @@ public class VideoConcatenator
             Logs.Warning("[VideoConcat] CurrentMedia has no video frames - VideoConcat should run after video generation");
             return;
         }
-
-        WGNodeData originalAudioVae = _generator.CurrentAudioVae;
-        WGNodeData originalVae = _generator.CurrentVae;
 
         // Get frames from appropriate parameter based on mode
         int? baseFrames = null;
@@ -256,7 +246,8 @@ public class VideoConcatenator
             }
         }
         
-        int? videoFps = baseFps ?? (int?)currentMedia.FPS;
+        // FPS can be a node reference (eg. loaded/extended video), so never cast it directly.
+        int? videoFps = baseFps ?? currentMedia.GetRawFPS();
 
         // Use the actual frame count of the first video as the default for continuations
         // This ensures all sections match the duration of video 1 even if the parameter differs
@@ -437,7 +428,7 @@ public class VideoConcatenator
         
         WGNodeData result = currentMedia.WithPath(concatenatedVideo);
         result.Frames = totalFrames;
-        result.FPS = videoFps;
+        result.FPS = videoFps.HasValue ? videoFps.Value : currentMedia.FPS;
 
         if (audioChunks.Count > 0)
         {
@@ -448,33 +439,10 @@ public class VideoConcatenator
             }
         }
         
+        // Saved by the core True Final Save step (priority 100) like any other video: honors 'Video Format'
+        // and avoids a duplicate output (this step used to save it itself, then the final save saved it again).
         _generator.CurrentMedia = result;
-        
-        string outputId = _generator.GetStableDynamicID(50000, 0);
-        
-        // Use VideoFastSave with NVENC support if enabled and RTX upscaling is active (high resolution)
-        // VideoFastSave automatically falls back to optimized CPU encoding if NVENC unavailable
-        if (_enableFastSave)
-        {
-            string videoFormat = _generator.UserInput.Get(T2IParamTypes.VideoFormat, "h264-mp4");
-            string qualityPreset = "balanced";
-            
-            string fastSaveNode = _generator.CreateNode("VideoFastSave", new JObject()
-            {
-                ["images"] = result.Path,
-                ["fps"] = videoFps,
-                ["quality"] = qualityPreset,
-                ["format"] = videoFormat,
-                ["audio"] = result.AttachedAudio?.Path
-            }, outputId);
-            
-            Logs.Info($"[VideoConcat] Generated {_sections.Count} sections using VideoFastSave (NVENC-accelerated), output ID {outputId}");
-        }
-        else
-        {
-            _generator.CurrentMedia.SaveOutput(originalVae, originalAudioVae, outputId);
-            Logs.Info($"[VideoConcat] Generated {_sections.Count} sections, concatenated video saved with ID {outputId}");
-        }
+        Logs.Info($"[VideoConcat] Concatenated {_sections.Count} sections ({totalFrames} frames), left for the final save");
 
         // Add cache cleanup node after all processing to free VRAM/RAM
         // This ensures models are unloaded between successive video generations
