@@ -50,6 +50,8 @@ public class VideoConcatenator
     private JArray _sections;
     private string[] _sectionPrompts;
     private int _transitionFrames = 12;
+    /// <summary>Frames of the previous section that the continuation reproduces at its start (see <see cref="UsesMultiFrameStart"/>).</summary>
+    private int _overlapFrames = 1;
     private string _transitionMode = "crossfade";
     private string _frameMode = "exclude_overlap";
     private bool _enableColorMatch = true;
@@ -155,6 +157,11 @@ public class VideoConcatenator
         }
 
         _transitionFrames = GetValidTransitionFrames(_transitionFrames, continuationModel);
+        // Most I2V models are conditioned on a single start image only (core's FixMediaLen keeps frame 0 of the input),
+        // so the continuation re-creates exactly one frame of the previous section. Feeding them the last N frames made the
+        // continuation start from the N-th last frame, and the crossfade then blended two diverging motions (ghosting + jump).
+        _overlapFrames = UsesMultiFrameStart(continuationModel) ? _transitionFrames : 1;
+        Logs.Info($"[VideoConcat] Overlap frames per seam: {_overlapFrames} (multi-frame start={UsesMultiFrameStart(continuationModel)})");
 
         WGNodeData currentMedia = _generator.CurrentMedia;
         Logs.Info($"[VideoConcat] CurrentMedia: DataType={currentMedia.DataType}, Frames={currentMedia.Frames}, Width={currentMedia.Width}, Height={currentMedia.Height}, Path={currentMedia.Path?[0] ?? "null"}");
@@ -378,36 +385,20 @@ public class VideoConcatenator
 
         if (_enableColorMatch && videoChunks.Count > 1)
         {
-            string compatClass = continuationModel?.ModelClass?.CompatClass?.ID ?? "";
-            bool isWan = compatClass.StartsWith("wan-21") || compatClass.StartsWith("wan-22");
-            
-            double strength = _colorStrength;
-            int refFrameCount = _transitionFrames;
-            
-            if (isWan)
-            {
-                refFrameCount = GetValidTransitionFrames((int)(_transitionFrames * 1.5), continuationModel);
-                Logs.Info($"[VideoConcat] Wan color match: refFrames {_transitionFrames}->{refFrameCount}");
-            }
-            
+            // The first '_overlapFrames' of each section re-create the last frames of the previous one, so their color
+            // difference is pure drift. Correct the whole section with that constant offset (it used to decay back to the
+            // section's own colors right after the seam, which made the color jump visible a few frames later).
             for (int i = 1; i < videoChunks.Count; i++)
             {
                 WGNodeData previousChunk = videoChunks[i - 1];
                 WGNodeData currentChunk = videoChunks[i];
-                
-                JArray refFrames = ExtractLastFrames(previousChunk.Path, refFrameCount);
-                
-                JArray colorMatched = ApplyColorMatching(currentChunk.Path, refFrames, strength, refFrameCount);
+                JArray refFrames = ExtractLastFrames(previousChunk.Path, _overlapFrames);
+                JArray colorMatched = ApplyColorMatching(currentChunk.Path, refFrames, _colorStrength, _overlapFrames);
                 videoChunks[i] = currentChunk.WithPath(colorMatched);
             }
         }
 
         JArray concatenatedVideo = ConcatenateVideoChunks(videoChunks, out int totalFrames);
-
-        if (_enableTemporalBlend)
-        {
-            concatenatedVideo = ApplyTemporalBlend(concatenatedVideo, _temporalStrength);
-        }
 
         // Apply RTX Video Super Resolution before final save (optional, expensive)
         if (_enableRTXUpscale)
@@ -432,7 +423,7 @@ public class VideoConcatenator
 
         if (audioChunks.Count > 0)
         {
-            JArray concatenatedAudio = ConcatenateAudioChunks(audioChunks);
+            JArray concatenatedAudio = ConcatenateAudioChunks(audioChunks, videoFps ?? 24);
             if (concatenatedAudio != null)
             {
                 result.AttachedAudio = new WGNodeData(concatenatedAudio, _generator, WGNodeData.DT_AUDIO, _generator.CurrentCompat());
@@ -482,7 +473,7 @@ public class VideoConcatenator
         string fromEndCountNode = _generator.CreateNode("SwarmIntAdd", new JObject()
         {
             ["a"] = frameCount,
-            ["b"] = -_transitionFrames
+            ["b"] = -_overlapFrames
         });
         JArray fromEndCount = [fromEndCountNode, 0];
 
@@ -490,7 +481,7 @@ public class VideoConcatenator
         {
             ["image"] = previousVideo.Path,
             ["batch_index"] = fromEndCount,
-            ["length"] = _transitionFrames
+            ["length"] = _overlapFrames
         });
         JArray partialBatch = [partialBatchNode, 0];
 
@@ -526,7 +517,7 @@ public class VideoConcatenator
             Steps = steps,
             Seed = seed,
             BatchIndex = 0,
-            BatchLen = _transitionFrames,
+            BatchLen = _overlapFrames,
             ContextID = T2IParamInput.SectionID_Video
         };
 
@@ -664,14 +655,16 @@ public class VideoConcatenator
         return [extractNode, 0];
     }
 
-    private JArray ApplyColorMatching(JArray currentVideo, JArray referenceVideo, double strength, int blendFrames = 0)
+    private JArray ApplyColorMatching(JArray currentVideo, JArray referenceVideo, double strength, int sourceFrames)
     {
         string colorMatchNode = _generator.CreateNode("VideoColorMatch", new JObject()
         {
             ["video"] = currentVideo,
             ["reference"] = referenceVideo,
             ["strength"] = strength,
-            ["blend_frames"] = blendFrames
+            ["blend_frames"] = 0,
+            ["mode"] = "constant",
+            ["source_frames"] = sourceFrames
         });
         return [colorMatchNode, 0];
     }
@@ -696,13 +689,17 @@ public class VideoConcatenator
             JArray nextVideo = chunks[i].Path;
             int nextFrames = chunks[i].Frames ?? 0;
 
+            // Smoothing is done at the seam inside the crossfade node, where the real frame index is known
+            // (a separate VideoTemporalBlend on the joined video only reached its very start and end).
             string crossfadeNode = _generator.CreateNode("VideoCrossFadeTransition", new JObject()
             {
                 ["video_a"] = currentVideo,
                 ["video_b"] = nextVideo,
-                ["transition_frames"] = _transitionFrames,
+                ["transition_frames"] = _overlapFrames,
                 ["blend_mode"] = _transitionMode,
-                ["include_overlap"] = _frameMode == "include_overlap"
+                ["include_overlap"] = _frameMode == "include_overlap",
+                ["seam_smooth_strength"] = _enableTemporalBlend ? _temporalStrength : 0.0,
+                ["seam_smooth_frames"] = Math.Max(2, _transitionFrames / 2)
             });
 
             currentVideo = [crossfadeNode, 0];
@@ -713,26 +710,14 @@ public class VideoConcatenator
             }
             else
             {
-                totalFrames = totalFrames + nextFrames - _transitionFrames;
+                totalFrames = totalFrames + nextFrames - _overlapFrames;
             }
         }
 
         return currentVideo;
     }
 
-    private JArray ApplyTemporalBlend(JArray video, double strength)
-    {
-        string blendNode = _generator.CreateNode("VideoTemporalBlend", new JObject()
-        {
-            ["video"] = video,
-            ["blend_strength"] = strength,
-            ["blend_frames"] = _transitionFrames,
-            ["mode"] = "transition_only"
-        });
-        return [blendNode, 0];
-    }
-
-    private JArray ConcatenateAudioChunks(List<JArray> chunks)
+    private JArray ConcatenateAudioChunks(List<JArray> chunks, int fps)
     {
         if (chunks.Count == 0)
             return null;
@@ -757,21 +742,31 @@ public class VideoConcatenator
         }
 
         JArray result = chunks[0];
-        int? videoFps = _generator.UserInput.TryGet(T2IParamTypes.VideoFPS, out int fpsRaw) ? fpsRaw : null;
-        int fps = videoFps ?? 24;
-        int audioCrossfadeSamples = (int)Math.Round(_audioCrossfadeFrames * (44100.0 / fps));
+        // Each section's audio also covers the overlap frames that the video join drops, so the audio must lose exactly
+        // that duration too (trim + crossfade), or it drifts out of sync by a few frames per seam.
+        double overlapSeconds = _overlapFrames / (double)fps;
+        double crossfadeSeconds = Math.Min(_audioCrossfadeFrames, _overlapFrames) / (double)fps;
         for (int i = 1; i < chunks.Count; i++)
         {
             string crossfadeNode = _generator.CreateNode("AudioCrossFade", new JObject()
             {
                 ["audio_a"] = result,
                 ["audio_b"] = chunks[i],
-                ["crossfade_samples"] = audioCrossfadeSamples
+                ["crossfade_samples"] = 882,
+                ["crossfade_seconds"] = crossfadeSeconds,
+                ["trim_b_seconds"] = overlapSeconds - crossfadeSeconds
             });
             result = new JArray(crossfadeNode, 0);
         }
         
         return result;
+    }
+
+    /// <summary>True if core's CreateImageToVideo feeds all BatchLen frames as the start (Wan), instead of only the first one.</summary>
+    public static bool UsesMultiFrameStart(T2IModel model)
+    {
+        string compatClass = model?.ModelClass?.CompatClass?.ID ?? "";
+        return compatClass == "wan-21-14b" || compatClass == "wan-21-1_3b" || compatClass == "wan-22-5b";
     }
 
     private int GetValidTransitionFrames(int frames, T2IModel model)

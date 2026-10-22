@@ -4,3 +4,4 @@ bin/
 obj/
 .ruff_cache/
 .qwen/
+.pytest_cache/

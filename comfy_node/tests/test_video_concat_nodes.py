@@ -287,3 +287,39 @@ class TestAudioCrossFade:
         out = result[0]["waveform"]
         a_wave = a["waveform"]
         torch.testing.assert_close(out[:, :non_overlap], a_wave[:, :non_overlap], atol=1e-6, rtol=1e-5)
+
+class TestSeamFixes:
+    def test_color_match_constant_applies_to_all_frames(self):
+        ref = make_video(frames=1, seed=5) * 0.5
+        video = torch.cat([ref * 0 + ref, make_video(frames=20, seed=6) * 0.5]) + 0.3
+        result = VideoColorMatch().match_colors(video, ref, 1.0, mode="constant", source_frames=1)[0]
+        torch.testing.assert_close(result[0], ref[0].clamp(0, 1), atol=1e-4, rtol=1e-4)
+        # Same shift on the last frame: no decay back to the original colors.
+        shift_first = (video[0] - result[0]).mean()
+        shift_last = (video[-1] - result[-1]).mean()
+        assert abs(shift_first - shift_last) < 0.05
+
+    def test_single_frame_overlap_drops_duplicate_frame(self):
+        a = make_video(frames=10, seed=1)
+        b = torch.cat([a[-1:], make_video(frames=9, seed=2)])
+        result = VideoCrossFadeTransition().crossfade(a, b, 1, "crossfade", include_overlap=False)[0]
+        assert result.shape[0] == 19
+        torch.testing.assert_close(result[:10], a)
+        torch.testing.assert_close(result[10:], b[1:])
+
+    def test_seam_smoothing_only_touches_seam(self):
+        a = make_video(frames=20, seed=1)
+        b = make_video(frames=20, seed=2)
+        plain = VideoCrossFadeTransition().crossfade(a, b, 1, "crossfade")[0]
+        smooth = VideoCrossFadeTransition().crossfade(a, b, 1, "crossfade", seam_smooth_strength=0.5, seam_smooth_frames=3)[0]
+        torch.testing.assert_close(smooth[:15], plain[:15])
+        torch.testing.assert_close(smooth[24:], plain[24:])
+        assert not torch.allclose(smooth[19:21], plain[19:21])
+
+    def test_audio_trim_keeps_sync(self):
+        sr = 24000
+        a = {"waveform": torch.rand(1, 2, sr), "sample_rate": sr}
+        b = {"waveform": torch.rand(1, 2, sr), "sample_rate": sr}
+        out = AudioCrossFade().crossfade(a, b, 882, crossfade_seconds=0.02, trim_b_seconds=0.02)[0]
+        # Total shortening = trim + crossfade = 0.04 s
+        assert out["waveform"].shape[-1] == 2 * sr - int(0.04 * sr)

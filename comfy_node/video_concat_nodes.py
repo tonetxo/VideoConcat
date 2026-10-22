@@ -88,7 +88,25 @@ class VideoColorMatch:
                         "tooltip": "How many frames to apply color matching with linear decay. 0 = apply to all frames at full strength.",
                     },
                 ),
-            }
+            },
+            "optional": {
+                "mode": (
+                    ["decay", "constant"],
+                    {
+                        "default": "decay",
+                        "tooltip": "decay: per-frame match fading out over 'blend_frames'. constant: one correction, measured on the first 'source_frames' of the video against the reference, applied to every frame.",
+                    },
+                ),
+                "source_frames": (
+                    "INT",
+                    {
+                        "default": 1,
+                        "min": 1,
+                        "max": 500,
+                        "tooltip": "constant mode: leading frames of 'video' that show the same content as 'reference'.",
+                    },
+                ),
+            },
         }
 
     RETURN_TYPES = ("IMAGE",)
@@ -96,13 +114,22 @@ class VideoColorMatch:
     CATEGORY = "SwarmUI/video"
     DESCRIPTION = "Match colors between video sections for visual coherence."
 
-    def match_colors(self, video, reference, strength, blend_frames=0):
+    def match_colors(self, video, reference, strength, blend_frames=0, mode="decay", source_frames=1):
         if strength <= 0:
             return (video,)
 
         ref_flat = reference.reshape(-1, reference.shape[-1])
         ref_mean = ref_flat.mean(dim=0).reshape(1, 1, 1, -1)
         ref_std = ref_flat.std(dim=0).clamp(min=0.01).reshape(1, 1, 1, -1)
+
+        if mode == "constant":
+            src = video[: max(1, min(source_frames, video.shape[0]))]
+            src_flat = src.reshape(-1, src.shape[-1])
+            src_mean = src_flat.mean(dim=0).reshape(1, 1, 1, -1)
+            src_std = src_flat.std(dim=0).clamp(min=0.01).reshape(1, 1, 1, -1)
+            matched = (video - src_mean) / src_std * ref_std + ref_mean
+            result = video * (1 - strength) + matched * strength
+            return (torch.clamp(result, 0.0, 1.0),)
 
         vid_mean = video.mean(dim=(1, 2), keepdim=True)
         vid_std = video.std(dim=(1, 2), keepdim=True).clamp(min=0.01)
@@ -228,7 +255,28 @@ class VideoCrossFadeTransition:
                         "tooltip": "If True, include overlap frames in output (longer video). If False, exclude overlap (same length as combined).",
                     },
                 ),
-            }
+            },
+            "optional": {
+                "seam_smooth_strength": (
+                    "FLOAT",
+                    {
+                        "default": 0.0,
+                        "min": 0.0,
+                        "max": 1.0,
+                        "step": 0.05,
+                        "tooltip": "Temporal smoothing around the point where video_b's new content starts. 0 = off.",
+                    },
+                ),
+                "seam_smooth_frames": (
+                    "INT",
+                    {
+                        "default": 4,
+                        "min": 1,
+                        "max": 30,
+                        "tooltip": "Frames on each side of the seam affected by the smoothing (linear falloff).",
+                    },
+                ),
+            },
         }
 
     RETURN_TYPES = ("IMAGE",)
@@ -237,7 +285,8 @@ class VideoCrossFadeTransition:
     DESCRIPTION = "Create a crossfade transition between two video sections."
 
     def crossfade(
-        self, video_a, video_b, transition_frames, blend_mode, include_overlap=False
+        self, video_a, video_b, transition_frames, blend_mode, include_overlap=False,
+        seam_smooth_strength=0.0, seam_smooth_frames=4,
     ):
         frames_a = video_a.shape[0]
         frames_b = video_b.shape[0]
@@ -315,7 +364,22 @@ class VideoCrossFadeTransition:
 
             result[non_trans_frames_a + trans :] = video_b[trans:]
 
+        seam = frames_a if include_overlap else non_trans_frames_a + trans
+        if seam_smooth_strength > 0:
+            result = self._smooth_seam(result, seam, seam_smooth_strength, seam_smooth_frames)
+
         return (result,)
+
+    @staticmethod
+    def _smooth_seam(video, seam, strength, radius):
+        """Blend each frame near 'seam' with its neighbours, strongest at the seam and fading out over 'radius' frames."""
+        frames = video.shape[0]
+        src = video.clone()
+        for j in range(max(1, seam - radius), min(frames - 1, seam + radius)):
+            dist = abs(j + 0.5 - seam)
+            w = strength * 0.5 * max(0.0, 1.0 - dist / (radius + 0.5))
+            video[j] = src[j] * (1 - w) + (src[j - 1] + src[j + 1]) * 0.5 * w
+        return video
 
 
 class VideoBatch:
@@ -411,7 +475,29 @@ class AudioCrossFade:
                         "tooltip": "Number of audio samples for crossfade (882 = ~20ms at 44.1kHz)",
                     },
                 ),
-            }
+            },
+            "optional": {
+                "crossfade_seconds": (
+                    "FLOAT",
+                    {
+                        "default": 0.0,
+                        "min": 0.0,
+                        "max": 10.0,
+                        "step": 0.001,
+                        "tooltip": "If > 0, overrides crossfade_samples using the real sample rate.",
+                    },
+                ),
+                "trim_b_seconds": (
+                    "FLOAT",
+                    {
+                        "default": 0.0,
+                        "min": 0.0,
+                        "max": 10.0,
+                        "step": 0.001,
+                        "tooltip": "Seconds dropped from the start of audio_b before the crossfade (keeps sync with a video join that drops overlap frames).",
+                    },
+                ),
+            },
         }
 
     RETURN_TYPES = ("AUDIO",)
@@ -419,7 +505,12 @@ class AudioCrossFade:
     CATEGORY = "SwarmUI/audio"
     DESCRIPTION = "Crossfade two audio tracks. Audio A fades out while Audio B fades in during overlap."
 
-    def crossfade(self, audio_a, audio_b, crossfade_samples):
+    def crossfade(self, audio_a, audio_b, crossfade_samples, crossfade_seconds=0.0, trim_b_seconds=0.0):
+        sample_rate = (
+            audio_a.get("sample_rate", 44100) if isinstance(audio_a, dict) else 44100
+        )
+        if crossfade_seconds > 0:
+            crossfade_samples = max(1, int(round(crossfade_seconds * sample_rate)))
         if crossfade_samples <= 0:
             return (audio_a,)
 
@@ -428,9 +519,6 @@ class AudioCrossFade:
         )
         waveform_b = (
             audio_b.get("waveform", audio_b) if isinstance(audio_b, dict) else audio_b
-        )
-        sample_rate = (
-            audio_a.get("sample_rate", 44100) if isinstance(audio_a, dict) else 44100
         )
 
         if waveform_a.dim() == 3:
@@ -442,6 +530,10 @@ class AudioCrossFade:
             waveform_b = waveform_b.squeeze(0)
         elif waveform_b.dim() == 1:
             waveform_b = waveform_b.unsqueeze(0)
+
+        trim = int(round(trim_b_seconds * sample_rate))
+        if 0 < trim < waveform_b.shape[-1]:
+            waveform_b = waveform_b[:, trim:]
 
         samples_a = waveform_a.shape[-1]
         samples_b = waveform_b.shape[-1]
