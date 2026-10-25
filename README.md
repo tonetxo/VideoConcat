@@ -10,6 +10,7 @@ Extension for concatenating multiple video sections with temporal and color cohe
 - **Per-Section Prompts**: Configure different prompts for each video section (starting from video 2)
 - **Configurable Durations**: Set specific frame counts for each section
 - **Toggle Switch**: Easily enable/disable the extension from the UI
+- **Auto Caption**: Describe the last frame of each section with a local vision LLM (Ollama or llama.cpp) to keep the next section coherent
 
 ## Installation
 
@@ -82,6 +83,32 @@ Durations in frames for each video section (including the first), separated by c
 - **Color Match Strength**: 0.0-1.0 (default: 0.5)
 - **Temporal Blend Strength**: 0.0-1.0 (default: 0.5)
 
+## Auto Caption (Ollama / llama.cpp)
+
+Optional. Describes the last frame of each section with a vision LLM and prepends the description to the next section's prompt, so the model knows what the previous clip looked like.
+Resulting prompt: `[Caption]. [Your section prompt]`.
+
+### Parameters
+
+- **Enable Auto Caption**: Toggle (default: disabled)
+- **Auto Caption Model**: Vision model to use, listed automatically from:
+  - Ollama at `http://127.0.0.1:11434` (only models with the `vision` capability) — shown as `Ollama: <name>`
+  - llama.cpp server at `http://127.0.0.1:8080` (in router mode, only models launched with `--mmproj`) — shown as `llama.cpp: <id>`
+  - The list is cached for 30 seconds; refresh the parameters to update it. An offline server is simply skipped.
+  - Required when Auto Caption is enabled.
+- **Auto Caption Instruction** (advanced): Instruction sent to the model with the frame. Leave empty for the default (a concise prompt-style description of subjects, setting, lighting and framing).
+
+### Behavior
+
+- ComfyUI models are unloaded before the request, since the LLM server shares the GPU.
+- After answering, the LLM is unloaded too (`keep_alive: 0` on Ollama, `/models/unload` on llama.cpp router mode) so the video model gets its VRAM back.
+- Thinking is disabled and any `<think>` blocks are stripped from the caption.
+- If the server fails or times out, the section prompt is used alone — the generation is not lost.
+
+### Requirements
+
+A running Ollama and/or llama.cpp server (`llama-server`) on localhost with at least one vision-capable model. Florence 2 is no longer used.
+
 ## ComfyUI Nodes
 
 The extension includes custom ComfyUI nodes:
@@ -92,6 +119,7 @@ The extension includes custom ComfyUI nodes:
 - `VideoBatch`: Batch video frames together
 - `EmptyLatentVideo`: Create empty latent for video generation
 - `VideoCacheCleanup`: Auto-free VRAM/RAM after video processing (unloads models, runs GC)
+- `VideoAutoCaption`: Caption an image with an Ollama / llama.cpp vision model, combine with the prompt and encode with CLIP
 
 ## RTX Video Super Resolution
 
@@ -153,6 +181,7 @@ src/Extensions/VideoConcat/
 ├── VideoConcatExtension.cs      # Main extension class
 ├── VideoConcatExtension.csproj  # Project file
 ├── VideoConcatenator.cs         # Core concatenation logic
+├── CaptionModels.cs             # Lists Ollama / llama.cpp vision models for Auto Caption
 ├── assets/
 │   ├── video-concat.js          # Frontend UI
 │   └── video-concat.css         # Styling
