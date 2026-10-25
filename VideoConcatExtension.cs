@@ -27,6 +27,8 @@ public class VideoConcatExtension : Extension
     public static T2IRegisteredParam<bool> VideoConcatEnableRTXUpscale;
     public static T2IRegisteredParam<bool> VideoConcatEnableFastSave;
     public static T2IRegisteredParam<bool> VideoConcatEnableAutoCaption;
+    public static T2IRegisteredParam<string> VideoConcatAutoCaptionModel;
+    public static T2IRegisteredParam<string> VideoConcatAutoCaptionInstruction;
 
     public override void OnPreInit()
     {
@@ -269,16 +271,43 @@ public class VideoConcatExtension : Extension
 
         VideoConcatEnableAutoCaption = T2IParamTypes.Register<bool>(new T2IParamType(
             Name: "Enable Auto Caption",
-            Description: "Automatically describe the last frame of each section using Florence 2,\n" +
+            Description: "Automatically describe the last frame of each section with a vision LLM (Ollama or llama.cpp),\n" +
                          "and inject the description into the next section's prompt.\n" +
                          "Helps the model maintain visual coherence between clips\n" +
                          "by knowing what the previous section looked like.\n" +
-                         "Format: '[Florence caption]. [Your section prompt]'",
+                         "Format: '[Caption]. [Your section prompt]'\n" +
+                         "Select the model in 'Auto Caption Model'.",
             Default: "false",
             Group: VideoConcatGroup,
             OrderPriority: priority++,
             FeatureFlag: "video",
             DoNotPreview: true
+        ));
+
+        VideoConcatAutoCaptionModel = T2IParamTypes.Register<string>(new T2IParamType(
+            Name: "Auto Caption Model",
+            Description: "Vision model used by Auto Caption.\n" +
+                         $"Lists vision-capable models from Ollama ({CaptionModels.OllamaUrl}) and llama.cpp server ({CaptionModels.LlamaCppUrl}).\n" +
+                         "Refresh the parameters to update the list (it is cached for 30 seconds).\n" +
+                         "If the server fails during generation, the section prompt is used alone.",
+            Default: "None",
+            Group: VideoConcatGroup,
+            OrderPriority: priority++,
+            FeatureFlag: "video",
+            DoNotPreview: true,
+            GetValues: _ => CaptionModels.List(),
+            ValidateValues: false
+        ));
+
+        VideoConcatAutoCaptionInstruction = T2IParamTypes.Register<string>(new T2IParamType(
+            Name: "Auto Caption Instruction",
+            Description: "Instruction sent to the vision model with the last frame. Leave empty for the default.",
+            Default: "",
+            Group: VideoConcatGroup,
+            OrderPriority: priority++,
+            FeatureFlag: "video",
+            DoNotPreview: true,
+            IsAdvanced: true
         ));
     }
 
@@ -319,6 +348,12 @@ public class VideoConcatExtension : Extension
             int audioCrossfadeFrames = g.UserInput.Get(VideoConcatAudioCrossfadeFrames, 8);
             bool enableRTXUpscale = g.UserInput.Get(VideoConcatEnableRTXUpscale, false);
             bool enableAutoCaption = g.UserInput.Get(VideoConcatEnableAutoCaption, false);
+            CaptionModels.Selection captionModel = CaptionModels.Parse(g.UserInput.Get(VideoConcatAutoCaptionModel, "None"));
+            string captionInstruction = g.UserInput.Get(VideoConcatAutoCaptionInstruction, "") ?? "";
+            if (enableAutoCaption && captionModel is null)
+            {
+                throw new SwarmUserErrorException("Video Concatenation 'Enable Auto Caption' requires an 'Auto Caption Model' (Ollama or llama.cpp vision model).");
+            }
 
             try
             {
@@ -344,7 +379,7 @@ public class VideoConcatExtension : Extension
                     .SetTemporalBlending(enableTemporalBlend, temporalStrength)
                     .SetAudioCrossfade(enableAudioCrossfade, audioCrossfadeFrames)
                     .SetRTXUpscale(enableRTXUpscale)
-                    .SetAutoCaption(enableAutoCaption)
+                    .SetAutoCaption(enableAutoCaption, captionModel, captionInstruction)
                     .Concatenate();
             }
             catch (Exception ex)

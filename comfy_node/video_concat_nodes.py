@@ -15,7 +15,7 @@ import wave
 from PIL import Image
 
 
-__version__ = "2.2.1"
+__version__ = "2.3.0"
 
 
 def _get_ffmpeg_path():
@@ -1054,11 +1054,93 @@ class VideoCacheCleanup:
         return (images,)
 
 
+_DEFAULT_CAPTION_INSTRUCTION = (
+    "Describe this video frame in one concise paragraph, as a prompt for a video generation model: "
+    "the subjects and their appearance, clothing, pose and position, the setting, lighting, colors "
+    "and camera framing. Output only the description."
+)
+
+
+def _http_post_json(url, payload, timeout):
+    import json
+    import urllib.request
+
+    req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"),
+                                 headers={"Content-Type": "application/json"}, method="POST")
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read().decode("utf-8") or "{}")
+
+
+def _image_to_png_b64(image, max_side=768):
+    import base64
+
+    frame = image[0] if image.dim() == 4 else image
+    arr = (frame.clamp(0, 1).cpu().numpy() * 255).astype(np.uint8)
+    pil = Image.fromarray(arr)
+    if max(pil.size) > max_side:
+        pil.thumbnail((max_side, max_side), Image.LANCZOS)
+    buf = io.BytesIO()
+    pil.save(buf, format="PNG")
+    return base64.b64encode(buf.getvalue()).decode("ascii")
+
+
+def _caption_ollama(base_url, model, instruction, image_b64, max_tokens, timeout):
+    import urllib.error
+
+    payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": instruction, "images": [image_b64]}],
+        "stream": False,
+        "think": False,
+        # Unload right after, so the video model gets its VRAM back.
+        "keep_alive": 0,
+        "options": {"num_predict": max_tokens},
+    }
+    try:
+        result = _http_post_json(f"{base_url}/api/chat", payload, timeout)
+    except urllib.error.HTTPError as e:
+        if e.code != 400:
+            raise
+        # Older Ollama versions / models reject the 'think' field.
+        payload.pop("think")
+        result = _http_post_json(f"{base_url}/api/chat", payload, timeout)
+    return (result.get("message") or {}).get("content", "")
+
+
+def _caption_llamacpp(base_url, model, instruction, image_b64, max_tokens, timeout):
+    payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": [
+            {"type": "text", "text": instruction},
+            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{image_b64}"}},
+        ]}],
+        "max_tokens": max_tokens,
+        "stream": False,
+        "chat_template_kwargs": {"enable_thinking": False},
+    }
+    result = _http_post_json(f"{base_url}/v1/chat/completions", payload, timeout)
+    choices = result.get("choices") or [{}]
+    content = (choices[0].get("message") or {}).get("content", "")
+    # Router mode: free the model's VRAM for the video model (best-effort, single servers lack this route).
+    try:
+        _http_post_json(f"{base_url}/models/unload", {"model": model}, 10)
+    except Exception:
+        pass
+    return content
+
+
+def _clean_caption(text):
+    import re
+
+    text = re.sub(r"<think>.*?</think>", "", text or "", flags=re.DOTALL)
+    return " ".join(text.split()).strip().rstrip(".")
+
+
 class VideoAutoCaption:
     """
-    Captions an image using the provided Florence 2 model, concatenates with
-    user prompt, encodes with CLIP, and returns conditioning.
-    Uses FL2MODEL from Florence2LoadModel for model management compatibility.
+    Captions an image with a vision LLM served by Ollama or llama.cpp (llama-server),
+    concatenates with the user prompt, encodes with CLIP, and returns conditioning.
+    If the server fails, falls back to the plain prompt so the generation is not lost.
     """
 
     @classmethod
@@ -1068,16 +1150,13 @@ class VideoAutoCaption:
                 "image": ("IMAGE",),
                 "prompt": ("STRING", {"default": "", "multiline": True}),
                 "clip": ("CLIP",),
-                "florence2_model": ("FL2MODEL",),
-                "task": (
-                    ["more_detailed_caption", "detailed_caption", "caption",
-                     "prompt_gen_mixed_caption", "prompt_gen_mixed_caption_plus"],
-                    {"default": "more_detailed_caption"},
-                ),
+                "backend": (["ollama", "llamacpp"], {"default": "ollama"}),
+                "server_url": ("STRING", {"default": "http://127.0.0.1:11434"}),
+                "model": ("STRING", {"default": ""}),
             },
             "optional": {
-                "max_new_tokens": ("INT", {"default": 128, "min": 32, "max": 512}),
-                "num_beams": ("INT", {"default": 3, "min": 1, "max": 16}),
+                "instruction": ("STRING", {"default": _DEFAULT_CAPTION_INSTRUCTION, "multiline": True}),
+                "max_tokens": ("INT", {"default": 256, "min": 32, "max": 2048}),
             }
         }
 
@@ -1085,68 +1164,33 @@ class VideoAutoCaption:
     RETURN_NAMES = ("positive",)
     FUNCTION = "encode"
     CATEGORY = "SwarmUI/video"
-    DESCRIPTION = "Caption an image with Florence 2, concatenate with prompt, encode with CLIP, return conditioning."
+    DESCRIPTION = "Caption an image with an Ollama / llama.cpp vision model, concatenate with prompt, encode with CLIP, return conditioning."
 
-    def encode(self, image, prompt, clip, florence2_model, task,
-               max_new_tokens=128, num_beams=3):
+    def encode(self, image, prompt, clip, backend, server_url, model,
+               instruction=_DEFAULT_CAPTION_INSTRUCTION, max_tokens=256):
         import comfy.model_management as mm
         import gc
-        processor = florence2_model['processor']
-        patcher = florence2_model['patcher']
-        dtype = florence2_model.get('dtype', torch.float16)
 
-        # Offload all other models to free VRAM before loading Florence2
-        # This avoids OOM when LTXV or other large models are resident in GPU
-        mm.unload_all_models()
-        mm.soft_empty_cache()
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        caption = ""
+        if model.strip():
+            # The LLM server shares the GPU: offload ComfyUI models first so it can load.
+            mm.unload_all_models()
+            mm.soft_empty_cache()
+            gc.collect()
 
-        # Decide device: use CUDA only if enough free VRAM (>3GB), else CPU
-        run_device = "cpu"
-        if torch.cuda.is_available():
-            free_vram = torch.cuda.mem_get_info()[0] / 1024**3
-            print(f"[VideoAutoCaption] Free VRAM after offload: {free_vram:.1f}GB", file=sys.stderr)
-            if free_vram > 3.0:
-                run_device = str(patcher.load_device)
+            base_url = server_url.strip().rstrip("/")
+            caption_fn = _caption_llamacpp if backend == "llamacpp" else _caption_ollama
+            try:
+                print(f"[VideoAutoCaption] Captioning with {backend} model '{model}' at {base_url}", file=sys.stderr)
+                caption = _clean_caption(caption_fn(base_url, model.strip(), instruction.strip() or _DEFAULT_CAPTION_INSTRUCTION,
+                                                    _image_to_png_b64(image), max_tokens, timeout=600))
+            except Exception as e:
+                print(f"[VideoAutoCaption] Caption failed ({e}), using the section prompt only", file=sys.stderr)
+        else:
+            print("[VideoAutoCaption] No caption model selected, using the section prompt only", file=sys.stderr)
 
-        print(f"[VideoAutoCaption] Running Florence2 on: {run_device}", file=sys.stderr)
-        model = patcher.model.to(run_device)
-
-        task_map = {
-            "caption": "<CAPTION>",
-            "detailed_caption": "<DETAILED_CAPTION>",
-            "more_detailed_caption": "<MORE_DETAILED_CAPTION>",
-            "prompt_gen_mixed_caption": "<MIXED_CAPTION>",
-            "prompt_gen_mixed_caption_plus": "<MIXED_CAPTION_PLUS>",
-        }
-        task_token = task_map.get(task, "<MORE_DETAILED_CAPTION>")
-
-        image_tensor = image
-        if image_tensor.dim() == 4:
-            image_tensor = image_tensor[0]
-        image_tensor = image_tensor.permute(2, 0, 1)
-
-        inputs = processor(text=task_token, images=image_tensor.unsqueeze(0))
-
-        run_dtype = dtype if run_device != "cpu" else torch.float32
-        with torch.no_grad():
-            generated_ids = model.generate(
-                input_ids=inputs["input_ids"].to(run_device),
-                pixel_values=inputs["pixel_values"].to(dtype=run_dtype, device=run_device),
-                max_new_tokens=max_new_tokens, num_beams=num_beams, do_sample=num_beams == 1,
-            )
-
-        # Move model back to CPU after inference to free VRAM
-        patcher.model.to("cpu")
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-
-        caption = processor.batch_decode(generated_ids, skip_special_tokens=False)[0]
-        caption = caption.replace('</s>', '').replace('<s>', '').replace('</s>', '').strip()
-
-        combined = f"{caption}. {prompt.strip()}" if prompt.strip() else caption
+        prompt = prompt.strip()
+        combined = f"{caption}. {prompt}" if caption and prompt else (caption or prompt)
         print(f"[VideoAutoCaption] {combined}", file=sys.stderr)
 
         import nodes

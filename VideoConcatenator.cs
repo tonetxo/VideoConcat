@@ -62,6 +62,8 @@ public class VideoConcatenator
     private int _audioCrossfadeFrames = 8;
     private bool _enableRTXUpscale = false;
     private bool _enableAutoCaption = false;
+    private CaptionModels.Selection _captionModel;
+    private string _captionInstruction = "";
 
     public VideoConcatenator(WorkflowGenerator generator)
     {
@@ -120,9 +122,11 @@ public class VideoConcatenator
         return this;
     }
 
-    public VideoConcatenator SetAutoCaption(bool enabled)
+    public VideoConcatenator SetAutoCaption(bool enabled, CaptionModels.Selection model, string instruction)
     {
-        _enableAutoCaption = enabled;
+        _enableAutoCaption = enabled && model is not null;
+        _captionModel = model;
+        _captionInstruction = instruction ?? "";
         return this;
     }
 
@@ -262,19 +266,6 @@ public class VideoConcatenator
         Logs.Info($"[VideoConcat] First video has {firstVideoFrames} frames (param default: {baseFrames}), using as default for sections");
         Logs.Info($"[VideoConcat] Starting continuation loop, _sections.Count={_sections.Count}, _sectionPrompts.Length={_sectionPrompts.Length}");
         
-        // Load Florence 2 model once before the continuation loop
-        JArray florence2Ref = null;
-        if (_enableAutoCaption)
-        {
-            string fl2Node = _generator.CreateNode("Florence2ModelLoader", new JObject()
-            {
-                ["model"] = "Florence-2-large",
-                ["precision"] = "fp16",
-            });
-            florence2Ref = new JArray(fl2Node, 0);
-            Logs.Info($"[VideoConcat] Loaded Florence2ModelLoader: nodeId={fl2Node}");
-        }
-
         for (int i = 1; i < _sections.Count; i++)
         {
             JObject section = _sections[i] as JObject;
@@ -317,16 +308,21 @@ public class VideoConcatenator
 
                 if (clipRef != null && ltxvCondId != null)
                 {
-                    string captionNode = _generator.CreateNode("VideoAutoCaption", new JObject()
+                    JObject captionInputs = new()
                     {
                         ["image"] = lastFrame,
                         ["prompt"] = prompt,
                         ["clip"] = clipRef,
-                        ["florence2_model"] = florence2Ref,
-                        ["task"] = "more_detailed_caption",
-                        ["max_new_tokens"] = 128,
-                        ["num_beams"] = 3,
-                    });
+                        ["backend"] = _captionModel.Backend,
+                        ["server_url"] = _captionModel.ServerUrl,
+                        ["model"] = _captionModel.Model,
+                        ["max_tokens"] = 256,
+                    };
+                    if (!string.IsNullOrWhiteSpace(_captionInstruction))
+                    {
+                        captionInputs["instruction"] = _captionInstruction;
+                    }
+                    string captionNode = _generator.CreateNode("VideoAutoCaption", captionInputs);
                     JArray captionRef = new JArray(captionNode, 0);
 
                     (_generator.Workflow[ltxvCondId]["inputs"] as JObject)["positive"] = captionRef;
