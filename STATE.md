@@ -49,6 +49,7 @@ Ejemplo: `Section Prompts = "A cat running|||A cat jumping"`
 src/Extensions/VideoConcat/
 ├── VideoConcatExtension.cs      # Registro de extensión y parámetros
 ├── VideoConcatenator.cs         # Lógica core de concatenación
+├── CaptionModels.cs            # Lista modelos de visión Ollama / llama.cpp para Auto Caption
 ├── README.md                   # Documentación
 ├── STATE.md                    # Este archivo
 └── comfy_node/
@@ -66,6 +67,7 @@ src/Extensions/VideoConcat/
 7. ✅ Modos configurables de transición
 8. ✅ RTX Video Super Resolution node integration (2x upscale)
 9. ✅ VideoFastSave node with NVENC GPU acceleration
+10. ✅ Auto Caption con modelos de visión de Ollama / llama.cpp (sustituye a Florence 2, v2.3.0)
 
 ## Parámetros
 
@@ -85,6 +87,9 @@ src/Extensions/VideoConcat/
 | `Extension Model` | T2IModel | "" | Modelo Image2Video para continuar secciones (requerido para Text2Video) |
 | `Enable Fast Save` | bool | true | Usar encoding GPU-accelerado (NVENC) para salida rápida |
 | `Enable RTX Upscale` | bool | false | Aplicar upscaling 2x RTX VSR (computacionalmente costoso) |
+| `Enable Auto Caption` | bool | false | Describe el último frame de cada sección y lo antepone al prompt de la siguiente |
+| `Auto Caption Model` | string | "None" | Modelo de visión: `ollama/<nombre>` o `llamacpp/<id>` (requerido si Auto Caption está activo) |
+| `Auto Caption Instruction` | string | "" | (Avanzado) Instrucción para el modelo; vacío = instrucción por defecto |
 | `Enable Fast Save` | bool | true | Usar encoding GPU-accelerado (NVENC) para salida rápida |
 
 ## Flujo de Trabajo Actualizado
@@ -123,6 +128,20 @@ src/Extensions/VideoConcat/
 - Temporal blending solo en boundaries, no en todo el video
 - Audio crossfade usa overlap blending, no fade in/out aislados
 
+### Auto Caption (v2.3.0)
+
+- Florence 2 eliminado (ya no se usa `Florence2ModelLoader` / `FL2MODEL`).
+- `CaptionModels.cs` rellena el selector consultando Ollama (`http://127.0.0.1:11434/api/tags`, filtra por `capabilities` con `vision`)
+  y llama.cpp server (`http://127.0.0.1:8080/v1/models`, en modo router solo modelos lanzados con `--mmproj`).
+  Caché de 30 s y timeout de 2 s por servidor: un servidor apagado no bloquea la UI.
+- Nodo `VideoAutoCaption` (inputs `backend`, `server_url`, `model`, `instruction`, `max_tokens`):
+  - Descarga los modelos de ComfyUI antes de llamar al servidor (comparten GPU).
+  - Envía el último frame como PNG (máx. 768 px) por HTTP: Ollama `/api/chat`, llama.cpp `/v1/chat/completions`.
+  - Desactiva thinking y limpia bloques `<think>`; tras responder libera la VRAM del LLM
+    (`keep_alive: 0` en Ollama, `/models/unload` en llama.cpp router).
+  - Si el servidor falla, usa solo el prompt de la sección (la generación no se pierde).
+- Formato del prompt resultante: `[Caption]. [Prompt de la sección]`.
+
 ## Commits
 
 1. `accbbcc1` - Fix audio crossfade: use proper overlap blending like video
@@ -135,6 +154,7 @@ src/Extensions/VideoConcat/
 8. **Pending commit** - fix: VideoFastSave grey colors + duration 0 (rewrite to use imageio_ffmpeg, add NVENC fallback)
 9. **Pending commit** - feat: add VideoCacheCleanup node to auto-free VRAM/RAM after generation
 10. **Pending commit** - fix: LTXV2 audio duration bug in sections with different frame counts
+11. `81bc5cf` - feat: replace Florence 2 auto caption with Ollama / llama.cpp vision models and model selector
 
 ## Bug Fixes
 
