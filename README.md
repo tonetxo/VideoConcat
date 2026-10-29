@@ -56,6 +56,8 @@ The extension will:
 - Use the Extension Model to continue with additional sections
 - Apply all transitions and effects between sections
 
+**Refiner with latent-model upscale**: when the Refiner upscales video 1 with a latent upscale model (`Refiner Upscale Method` = `latentmodel-...`, supported for MiniMax H3, LTX-Video 2 and Hunyuan Video 1.5), each continuation is generated the same way: base resolution first, then latent upscaled and refined with the Refiner steps/CFG/sampler. Without this, continuations would run all their steps at the upscaled resolution (several times slower). The Extension Model must be of the same model class as the main model; a separate Refiner Model is not applied to continuations (they are refined with the Extension Model).
+
 ## Parameters
 
 ### Enable Video Concatenation

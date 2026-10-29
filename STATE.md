@@ -128,6 +128,16 @@ src/Extensions/VideoConcat/
 - Temporal blending solo en boundaries, no en todo el video
 - Audio crossfade usa overlap blending, no fade in/out aislados
 
+### Refiner latent upscale en continuaciones
+
+- En Text2Video, si el Refiner usa `Refiner Upscale` != 1 con `latentmodel-...` (MiniMax H3, LTXV2, Hunyuan Video 1.5), las
+  continuaciones se generan a la resolución base y luego `ApplyContinuationRefine` hace upscale latente + KSampler desde
+  `round(steps * (1 - RefinerControl))`, igual que el paso Refiner del core para el vídeo 1.
+- Antes se generaban con todos los pasos a la resolución ya escalada (~5x más lento por paso en H3).
+- El conditioning I2V se re-ancla a la resolución escalada con el último frame original: H3 `SwarmMiniMaxH3AddKeyframes`,
+  LTXV2 `LTXVCropGuides` + `LTXVImgToVideoInplace`, Hunyuan 1.5 reconstruye `HunyuanVideo15ImageToVideo`.
+- Requiere que el Extension Model sea de la misma clase que el modelo principal; el Refiner Model alternativo no se aplica.
+
 ### Auto Caption (v2.3.0)
 
 - Florence 2 eliminado (ya no se usa `Florence2ModelLoader` / `FL2MODEL`).

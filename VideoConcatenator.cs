@@ -235,8 +235,17 @@ public class VideoConcatenator
             height = imageHeight;
         }
 
-        JArray widthArr = GetWidthNode();
-        JArray heightArr = GetHeightNode();
+        JToken widthArr = GetWidthNode();
+        JToken heightArr = GetHeightNode();
+        // With a Refiner latent-model upscale the first section was generated at the base resolution and then upscaled +
+        // refined, so continuations do the same instead of running all their steps at the upscaled resolution.
+        ContinuationRefineInfo refine = ResolveContinuationRefine(continuationModel, isText2Video);
+        if (refine is not null)
+        {
+            widthArr = refine.BaseWidth;
+            heightArr = refine.BaseHeight;
+            Logs.Info($"[VideoConcat] Refiner latent upscale on continuations: base {refine.BaseWidth}x{refine.BaseHeight} -> {refine.Width}x{refine.Height}, refine steps {refine.StartStep}-{refine.Steps}");
+        }
 
         WGNodeData previousVideo = currentMedia;
         List<WGNodeData> videoChunks = [currentMedia];
@@ -286,7 +295,7 @@ public class VideoConcatenator
 
                 WGNodeData newVideo = GenerateContinuationSection(
                     continuationModel, previousVideo, frames, videoFps ?? 24, sectionSteps, sectionCfg,
-                    width, height, widthArr, heightArr, prompt, negPrompt, sectionSeed, i
+                    width, height, widthArr, heightArr, prompt, negPrompt, sectionSeed, i, refine
                 );
 
                 // Find CLIPTextEncode's clip and LTXVConditioning's positive
@@ -354,7 +363,7 @@ public class VideoConcatenator
 
                 WGNodeData newVideo = GenerateContinuationSection(
                     continuationModel, previousVideo, frames, videoFps ?? 24, sectionSteps, sectionCfg,
-                    width, height, widthArr, heightArr, prompt, negPrompt, sectionSeed, i
+                    width, height, widthArr, heightArr, prompt, negPrompt, sectionSeed, i, refine
                 );
 
                 Logs.Info($"[VideoConcat] Section {i} generated: Frames={newVideo.Frames}, DataType={newVideo.DataType}");
@@ -452,12 +461,13 @@ public class VideoConcatenator
         double? cfg,
         int width,
         int height,
-        JArray widthArr,
-        JArray heightArr,
+        JToken widthArr,
+        JToken heightArr,
         string prompt,
         string negPrompt,
         long seed,
-        int sectionIndex)
+        int sectionIndex,
+        ContinuationRefineInfo refine)
     {
         // Extract the last N frames of the previous video as input for continuation
         string frameCountNode = _generator.CreateNode("SwarmCountFrames", new JObject()
@@ -533,6 +543,11 @@ public class VideoConcatenator
 
         WGNodeData result = _generator.CurrentMedia;
 
+        if (refine is not null)
+        {
+            result = ApplyContinuationRefine(genInfo, result, partialBatch, refine, seed + 1, sectionIndex);
+        }
+
         if (isLTXV1 && result.DataType == WGNodeData.DT_VIDEO && genInfo.Vae != null)
         {
             string decodeNodeId = result.Path[0]?.ToString();
@@ -583,6 +598,179 @@ public class VideoConcatenator
 
         Logs.Info($"[VideoConcat] Section {sectionIndex}: requested {frames} frames, result type={result.DataType}");
 
+        return result;
+    }
+
+    /// <summary>Settings of the core Refiner's latent-model upscale, mirrored on each continuation section.</summary>
+    public record ContinuationRefineInfo(string UpscaleModel, int BaseWidth, int BaseHeight, int Width, int Height, int Steps, int StartStep, double Cfg, bool AddNoise);
+
+    /// <summary>Returns the Refiner latent-model upscale settings to mirror on continuations, or null when the first section was not refined that way.</summary>
+    private ContinuationRefineInfo ResolveContinuationRefine(T2IModel continuationModel, bool isText2Video)
+    {
+        T2IParamInput input = _generator.UserInput;
+        // In Image2Video mode the refiner runs on the init image, not on the video, so the first section is not upscaled.
+        if (!isText2Video || !input.TryGet(T2IParamTypes.RefinerMethod, out string method) || !input.TryGet(T2IParamTypes.RefinerControl, out double refinerControl))
+        {
+            return null;
+        }
+        if (!input.TryGet(T2IParamTypes.RefinerUpscale, out double refineUpscale) || refineUpscale == 1)
+        {
+            return null;
+        }
+        string upscaleMethod = input.Get(ComfyUIBackendExtension.RefinerUpscaleMethod, "None");
+        if (!upscaleMethod.StartsWith("latentmodel-"))
+        {
+            return null;
+        }
+        string compatId = continuationModel?.ModelClass?.CompatClass?.ID ?? "";
+        if (compatId != T2IModelClassSorter.CompatMiniMaxH3.ID && compatId != T2IModelClassSorter.CompatLtxv2.ID && compatId != T2IModelClassSorter.CompatHunyuanVideo1_5.ID)
+        {
+            Logs.Warning($"[VideoConcat] Refiner latent-model upscale is not supported on continuations for '{compatId}', continuations run at the upscaled resolution");
+            return null;
+        }
+        T2IModel mainModel = input.Get(T2IParamTypes.Model, null);
+        if (mainModel?.ModelClass?.CompatClass?.ID != compatId)
+        {
+            Logs.Warning($"[VideoConcat] Extension Model class '{compatId}' differs from the main model, the Refiner latent upscale model cannot be reused, continuations run at the upscaled resolution");
+            return null;
+        }
+        int baseWidth = input.GetImageWidth();
+        int baseHeight = input.GetImageHeight();
+        // Same target size as the core Refiner step.
+        int width = ((int)Math.Round(baseWidth * refineUpscale) / 16) * 16;
+        int height = ((int)Math.Round(baseHeight * refineUpscale) / 16) * 16;
+        if (compatId == T2IModelClassSorter.CompatMiniMaxH3.ID)
+        {
+            width = (width / 32) * 32;
+            height = (height / 32) * 32;
+        }
+        int steps = input.Get(T2IParamTypes.RefinerSteps, input.Get(T2IParamTypes.Steps, 20, sectionId: T2IParamInput.SectionID_Refiner), sectionId: T2IParamInput.SectionID_Refiner);
+        int startStep = refinerControl <= 0 ? steps : (int)Math.Round(steps * (1 - refinerControl));
+        double cfg = input.Get(T2IParamTypes.RefinerCFGScale, input.Get(T2IParamTypes.CFGScale, 7, sectionId: T2IParamInput.SectionID_Refiner), sectionId: T2IParamInput.SectionID_Refiner);
+        return new ContinuationRefineInfo(upscaleMethod.After("latentmodel-"), baseWidth, baseHeight, width, height, steps, startStep, cfg, method != "StepSwapNoisy");
+    }
+
+    /// <summary>Latent-upscales a base-resolution continuation section and refines it, like the core Refiner step does for the first section.</summary>
+    private WGNodeData ApplyContinuationRefine(WorkflowGenerator.ImageToVideoGenInfo genInfo, WGNodeData decoded, JArray sourceFrames, ContinuationRefineInfo refine, long seed, int sectionIndex)
+    {
+        WGNodeData vae = genInfo.Vae;
+        WGNodeData audioVae = _generator.CurrentAudioVae;
+        string compatId = genInfo.VideoModel?.ModelClass?.CompatClass?.ID ?? "";
+        // The decoded section comes straight from a VAE decode, so this resolves back to the sampled latent (no re-encode).
+        WGNodeData latent = decoded.EncodeToLatent(vae);
+        JArray pos = genInfo.PosCond, neg = genInfo.NegCond;
+        // Previous section's frame at full resolution, to re-anchor the refine pass.
+        string firstFrameNode = _generator.CreateNode("ImageFromBatch", new JObject()
+        {
+            ["image"] = sourceFrames,
+            ["batch_index"] = 0,
+            ["length"] = 1
+        });
+        JArray firstFrame = [firstFrameNode, 0];
+        string upscaleLoader = _generator.CreateNode("LatentUpscaleModelLoader", new JObject()
+        {
+            ["model_name"] = refine.UpscaleModel
+        });
+        JArray upscaleModel = [upscaleLoader, 0];
+        if (compatId == T2IModelClassSorter.CompatMiniMaxH3.ID)
+        {
+            // Rejoin the section's audio first, like the core Refiner (the upscale node passes audio through unchanged).
+            latent = latent.AsSamplingLatent(vae, audioVae);
+            string upscaled = _generator.CreateNode("MiniMaxH3LatentUpscaleWithModel", new JObject()
+            {
+                ["model"] = upscaleModel,
+                ["samples"] = latent.Path,
+                ["width"] = refine.Width,
+                ["height"] = refine.Height
+            });
+            latent = latent.WithPath([upscaled, 0]);
+            // The section's keyframe latent was encoded at the base resolution, replace it with one matching the upscaled latent.
+            string keyframes = _generator.CreateNode("SwarmMiniMaxH3AddKeyframes", new JObject()
+            {
+                ["vae"] = vae.Path,
+                ["latent"] = latent.Path,
+                ["conditioning"] = pos,
+                ["first_frame"] = firstFrame
+            });
+            pos = [keyframes, 0];
+        }
+        else if (compatId == T2IModelClassSorter.CompatLtxv2.ID)
+        {
+            latent = latent.AsLatentImage(vae);
+            string cropGuides = _generator.CreateNode("LTXVCropGuides", new JObject()
+            {
+                ["positive"] = pos,
+                ["negative"] = neg,
+                ["latent"] = latent.Path
+            });
+            pos = [cropGuides, 0];
+            neg = [cropGuides, 1];
+            string upscaled = _generator.CreateNode("LTXVLatentUpsampler", new JObject()
+            {
+                ["vae"] = vae.Path,
+                ["samples"] = new JArray(cropGuides, 2),
+                ["upscale_model"] = upscaleModel
+            });
+            string preproc = _generator.CreateNode("LTXVPreprocess", new JObject()
+            {
+                ["image"] = firstFrame,
+                ["img_compression"] = 18
+            });
+            string anchored = _generator.CreateNode("LTXVImgToVideoInplace", new JObject()
+            {
+                ["vae"] = vae.Path,
+                ["image"] = new JArray(preproc, 0),
+                ["latent"] = new JArray(upscaled, 0),
+                ["strength"] = 1.0,
+                ["bypass"] = false
+            });
+            latent = latent.WithPath([anchored, 0], WGNodeData.DT_LATENT_VIDEO);
+        }
+        else
+        {
+            latent = latent.AsLatentImage(vae);
+            string upscaled = _generator.CreateNode("HunyuanVideo15LatentUpscaleWithModel", new JObject()
+            {
+                ["model"] = upscaleModel,
+                ["samples"] = latent.Path,
+                ["upscale_method"] = "bilinear",
+                ["width"] = refine.Width,
+                ["height"] = refine.Height,
+                ["crop"] = "disabled"
+            });
+            latent = latent.WithPath([upscaled, 0], WGNodeData.DT_LATENT_VIDEO);
+            // The I2V conditioning carries the start image latent at the base resolution, rebuild it at the upscaled one.
+            if (_generator.Workflow[$"{pos[0]}"] is JObject i2vNode && $"{i2vNode["class_type"]}" == "HunyuanVideo15ImageToVideo")
+            {
+                JObject i2vInputs = (JObject)i2vNode["inputs"].DeepClone();
+                i2vInputs["width"] = refine.Width;
+                i2vInputs["height"] = refine.Height;
+                i2vInputs["start_image"] = firstFrame;
+                string rebuilt = _generator.CreateNode("HunyuanVideo15ImageToVideo", i2vInputs);
+                pos = [rebuilt, 0];
+                neg = [rebuilt, 1];
+            }
+            else
+            {
+                Logs.Warning($"[VideoConcat] Section {sectionIndex}: HunyuanVideo15ImageToVideo conditioning not found, refining with the base resolution conditioning");
+            }
+        }
+        latent.Width = refine.Width;
+        latent.Height = refine.Height;
+        if (refine.StartStep < refine.Steps)
+        {
+            latent = latent.AsSamplingLatent(vae, audioVae);
+            string explicitSampler = _generator.UserInput.Get(ComfyUIBackendExtension.SamplerParam, null, sectionId: T2IParamInput.SectionID_Refiner, includeBase: false) ?? _generator.UserInput.Get(ComfyUIBackendExtension.RefinerSamplerParam, null);
+            string explicitScheduler = _generator.UserInput.Get(ComfyUIBackendExtension.SchedulerParam, null, sectionId: T2IParamInput.SectionID_Refiner, includeBase: false) ?? _generator.UserInput.Get(ComfyUIBackendExtension.RefinerSchedulerParam, null);
+            string sampled = _generator.CreateKSampler(genInfo.Model.Path, pos, neg, latent.Path, refine.Cfg, refine.Steps, refine.StartStep, 10000,
+                seed, false, refine.AddNoise, doTiled: _generator.UserInput.Get(T2IParamTypes.RefinerDoTiling, false),
+                explicitSampler: explicitSampler, explicitScheduler: explicitScheduler, sectionId: T2IParamInput.SectionID_Refiner);
+            latent = latent.WithPath([sampled, 0]);
+        }
+        WGNodeData result = latent.AsRawImage(vae);
+        result.Width = refine.Width;
+        result.Height = refine.Height;
+        Logs.Info($"[VideoConcat] Section {sectionIndex}: latent upscaled to {refine.Width}x{refine.Height} and refined ({refine.Steps - refine.StartStep} steps)");
         return result;
     }
 
